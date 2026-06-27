@@ -18,7 +18,7 @@ Go to [GitHub Releases](https://github.com/segunak/one-note-to-markdown/releases
 2. Extract the folder (it contains the `.exe` and a `resources` folder)
 3. Run `OneNoteMarkdownExporter.exe`
 
-> **Important:** Keep the `resources` folder in the same directory as the `.exe`. It contains the bundled Node.js runtime and markdownlint-cli needed for Markdown linting.
+> **Important:** Keep the `resources` folder in the same directory as the `.exe`. It contains stuff needed for Markdown linting.
 
 ## Requirements
 
