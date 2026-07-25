@@ -130,8 +130,7 @@ namespace OneNoteMarkdownExporter.Services
 
         private void ProcessOutline(XElement outline, StringBuilder html)
         {
-            var oeChildren = outline.Element(_ns + "OEChildren");
-            if (oeChildren != null)
+            foreach (var oeChildren in outline.Elements(_ns + "OEChildren"))
             {
                 ProcessOEChildren(oeChildren, html);
             }

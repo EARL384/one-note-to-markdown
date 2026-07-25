@@ -174,6 +174,39 @@ public class OneNoteXmlToMarkdownConverterTests
     }
 
     [Fact]
+    public void Convert_OutlineWithMultipleOEChildren_PreservesContentAfterBulletList()
+    {
+        // Arrange
+        var xml = @"<?xml version=""1.0""?>
+            <one:Page xmlns:one=""http://schemas.microsoft.com/office/onenote/2013/onenote"">
+                <one:Outline>
+                    <one:OEChildren indent=""2"">
+                        <one:OE>
+                            <one:List><one:Bullet /></one:List>
+                            <one:T><![CDATA[The first thing]]></one:T>
+                        </one:OE>
+                        <one:OE>
+                            <one:List><one:Bullet /></one:List>
+                            <one:T><![CDATA[The second thing]]></one:T>
+                        </one:OE>
+                    </one:OEChildren>
+                    <one:OEChildren>
+                        <one:OE><one:T><![CDATA[]]></one:T></one:OE>
+                        <one:OE><one:T><![CDATA[This should still show up]]></one:T></one:OE>
+                    </one:OEChildren>
+                </one:Outline>
+            </one:Page>";
+
+        // Act
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        // Assert
+        result.Should().Contain("- The first thing");
+        result.Should().Contain("- The second thing");
+        result.Should().Contain("This should still show up");
+    }
+
+    [Fact]
     public void Convert_NumberedList_CreatesOrderedList()
     {
         // Arrange
