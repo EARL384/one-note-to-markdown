@@ -102,12 +102,12 @@ namespace OneNoteMarkdownExporter.Services
 
             var noLintOption = new Option<bool>("--no-lint")
             {
-                Description = "Disable Markdown linting (markdownlint-cli)"
+                Description = "Disable Markdown linting (markdownlint-cli2)"
             };
 
             var lintConfigOption = new Option<string?>("--lint-config")
             {
-                Description = "Path to custom markdownlint configuration file"
+                Description = "Path to custom .markdownlint.json configuration file"
             };
 
             var noPreserveDatesOption = new Option<bool>("--no-preserve-dates")
@@ -259,7 +259,12 @@ namespace OneNoteMarkdownExporter.Services
                         Console.WriteLine("Assets directory: generated per selected organization mode");
                     }
                     Console.WriteLine($"Overwrite: {(options.Overwrite ? "Yes" : "No")}");
-                    Console.WriteLine($"Linting: {(options.ApplyLinting ? "Enabled (markdownlint-cli)" : "Disabled")}");
+                    var lintingStatus = !options.ApplyLinting
+                        ? "Disabled"
+                        : exportService.IsMarkdownCliLinterAvailable
+                            ? "Enabled (markdownlint-cli2)"
+                            : "Unavailable (export will continue without linting)";
+                    Console.WriteLine($"Linting: {lintingStatus}");
                     Console.WriteLine($"Date preservation: {(options.PreserveDates ? "Enabled" : "Disabled")}");
                     Console.WriteLine($"Date metadata: {FormatDateMetadataMode(options.DateMetadataMode)}");
                     if (options.DryRun) Console.WriteLine("Mode: DRY RUN (no files will be created)");

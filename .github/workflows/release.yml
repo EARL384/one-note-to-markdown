@@ -68,7 +68,7 @@ jobs:
       run: dotnet restore
 
     - name: Build and run tests
-      run: dotnet test --verbosity normal --configuration Release
+      run: dotnet test OneNoteMarkdownExporter.slnx --verbosity normal --configuration Release
 
     - name: Publish with MSBuild
       run: |

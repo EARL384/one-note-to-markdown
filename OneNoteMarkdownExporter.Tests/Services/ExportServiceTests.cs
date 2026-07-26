@@ -368,6 +368,92 @@ public class ExportServiceTests
     }
 
     [Fact]
+    public async Task ExportSelectedAsync_WithCustomLintConfig_ForwardsNormalizedPath()
+    {
+        var outputPath = CreateTempExportPath();
+        var configPath = Path.Combine(outputPath, "custom.markdownlint.json");
+        Directory.CreateDirectory(outputPath);
+        File.WriteAllText(configPath, "{\"default\":true}");
+        var linter = new RecordingMarkdownLintService();
+        var service = new ExportService(new FakeOneNoteExportSource(), new RecordingMarkdownConverter(), linter);
+        var options = new ExportOptions
+        {
+            OutputPath = outputPath,
+            LintConfigPath = configPath,
+            ApplyLinting = true,
+            Overwrite = true
+        };
+
+        try
+        {
+            var result = await service.ExportSelectedAsync(CreateSelectedHierarchy(), options);
+
+            result.Success.Should().BeTrue();
+            linter.ConfigPaths.Should().ContainSingle().Which.Should().Be(Path.GetFullPath(configPath));
+        }
+        finally
+        {
+            if (Directory.Exists(outputPath)) Directory.Delete(outputPath, true);
+        }
+    }
+
+    [Fact]
+    public async Task ExportSelectedAsync_WhenLintRuntimeUnavailable_WarnsOnceAndExportsOriginalContent()
+    {
+        var outputPath = CreateTempExportPath();
+        var linter = new StubMarkdownLintService
+        {
+            IsAvailable = false,
+            UnavailableReason = "runtime missing"
+        };
+        var service = new ExportService(new FakeOneNoteExportSource(), new RecordingMarkdownConverter(), linter);
+        var options = new ExportOptions { OutputPath = outputPath, ApplyLinting = true, Overwrite = true };
+
+        try
+        {
+            var result = await service.ExportSelectedAsync(CreateSelectedHierarchy(), options);
+            var markdownPath = Path.Combine(outputPath, "Project Notebook", "Meeting Notes", "Planning Page.md");
+
+            result.Success.Should().BeTrue();
+            result.Warnings.Should().ContainSingle().Which.Should().Contain("Markdown linting is unavailable: runtime missing");
+            linter.Calls.Should().Be(0);
+            File.ReadAllText(markdownPath).Should().StartWith("asset:");
+        }
+        finally
+        {
+            if (Directory.Exists(outputPath)) Directory.Delete(outputPath, true);
+        }
+    }
+
+    [Fact]
+    public async Task ExportSelectedAsync_WhenLintingFails_WarnsAndExportsOriginalContent()
+    {
+        var outputPath = CreateTempExportPath();
+        var linter = new StubMarkdownLintService
+        {
+            IsAvailable = true,
+            Result = new LintResult { Success = false, Content = "discarded", ErrorMessage = "lint failed" }
+        };
+        var service = new ExportService(new FakeOneNoteExportSource(), new RecordingMarkdownConverter(), linter);
+        var options = new ExportOptions { OutputPath = outputPath, ApplyLinting = true, Overwrite = true };
+
+        try
+        {
+            var result = await service.ExportSelectedAsync(CreateSelectedHierarchy(), options);
+            var markdownPath = Path.Combine(outputPath, "Project Notebook", "Meeting Notes", "Planning Page.md");
+
+            result.Success.Should().BeTrue();
+            result.Warnings.Should().ContainSingle().Which.Should().Contain("Markdown linting failed for 'Planning Page': lint failed");
+            linter.Calls.Should().Be(1);
+            File.ReadAllText(markdownPath).Should().StartWith("asset:");
+        }
+        finally
+        {
+            if (Directory.Exists(outputPath)) Directory.Delete(outputPath, true);
+        }
+    }
+
+    [Fact]
     public async Task ExportSelectedAsync_WithSelectedParentPage_ExportsParentAndSubpagesInNestedFolders()
     {
         var outputPath = CreateTempExportPath();
@@ -549,9 +635,9 @@ public class ExportServiceTests
         public bool IsAvailable => true;
         public string UnavailableReason => string.Empty;
 
-        public string LintContent(string markdown)
+        public LintResult LintContent(string markdown, string? configPath = null)
         {
-            return markdown;
+            return new LintResult { Success = true, Content = markdown };
         }
     }
 
@@ -560,11 +646,27 @@ public class ExportServiceTests
         public bool IsAvailable => true;
         public string UnavailableReason => string.Empty;
         public List<string> Inputs { get; } = new();
+        public List<string?> ConfigPaths { get; } = new();
 
-        public string LintContent(string markdown)
+        public LintResult LintContent(string markdown, string? configPath = null)
         {
             Inputs.Add(markdown);
-            return markdown;
+            ConfigPaths.Add(configPath);
+            return new LintResult { Success = true, Content = markdown };
+        }
+    }
+
+    private sealed class StubMarkdownLintService : IMarkdownLintService
+    {
+        public bool IsAvailable { get; init; }
+        public string UnavailableReason { get; init; } = string.Empty;
+        public LintResult Result { get; init; } = new() { Success = true };
+        public int Calls { get; private set; }
+
+        public LintResult LintContent(string markdown, string? configPath = null)
+        {
+            Calls++;
+            return Result;
         }
     }
 

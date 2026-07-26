@@ -2,12 +2,13 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
 
 namespace OneNoteMarkdownExporter.Services
 {
     /// <summary>
-    /// Service for running markdownlint-cli using the bundled Node.js runtime.
+    /// Service for running markdownlint-cli2 using the bundled Node.js runtime.
     /// This provides full markdownlint compatibility without requiring users to install Node.js.
     /// </summary>
     public class MarkdownLintCliService : IMarkdownLintService
@@ -20,14 +21,12 @@ namespace OneNoteMarkdownExporter.Services
         public bool IsAvailable => _isAvailable;
         public string UnavailableReason { get; private set; } = "";
 
-        public MarkdownLintCliService()
+        public MarkdownLintCliService(string? resourcesDirectory = null)
         {
-            // Get the path to the resources folder relative to the executable
-            var baseDir = AppContext.BaseDirectory;
-            var resourcesDir = Path.Combine(baseDir, "resources");
+            var resourcesDir = resourcesDirectory ?? Path.Combine(AppContext.BaseDirectory, "resources");
 
             _nodeExePath = Path.Combine(resourcesDir, "node.exe");
-            _markdownLintPath = Path.Combine(resourcesDir, "node_modules", "markdownlint-cli", "markdownlint.js");
+            _markdownLintPath = Path.Combine(resourcesDir, "markdownlint-cli2.mjs");
             _configPath = Path.Combine(resourcesDir, ".markdownlint.json");
 
             CheckAvailability();
@@ -45,7 +44,25 @@ namespace OneNoteMarkdownExporter.Services
             if (!File.Exists(_markdownLintPath))
             {
                 _isAvailable = false;
-                UnavailableReason = $"markdownlint-cli not found. Please run 'npm install' in the resources folder.";
+                UnavailableReason = $"markdownlint-cli2 bundle not found at: {_markdownLintPath}";
+                return;
+            }
+
+            if (!File.Exists(_configPath))
+            {
+                _isAvailable = false;
+                UnavailableReason = $"Markdown lint configuration not found at: {_configPath}";
+                return;
+            }
+
+            try
+            {
+                ValidateConfigFile(_configPath);
+            }
+            catch (Exception ex)
+            {
+                _isAvailable = false;
+                UnavailableReason = ex.Message;
                 return;
             }
 
@@ -54,11 +71,12 @@ namespace OneNoteMarkdownExporter.Services
         }
 
         /// <summary>
-        /// Lints and fixes a markdown file in place using markdownlint-cli.
+        /// Lints and fixes a markdown file in place using markdownlint-cli2.
         /// </summary>
         /// <param name="filePath">Path to the markdown file to lint.</param>
+        /// <param name="configPath">Optional path to a custom JSON configuration file.</param>
         /// <returns>Result containing success status and any output messages.</returns>
-        public async Task<LintResult> LintFileAsync(string filePath)
+        public async Task<LintResult> LintFileAsync(string filePath, string? configPath = null)
         {
             if (!_isAvailable)
             {
@@ -80,64 +98,59 @@ namespace OneNoteMarkdownExporter.Services
 
             try
             {
-                var arguments = new StringBuilder();
-                arguments.Append($"\"{_markdownLintPath}\" ");
-                arguments.Append("--fix ");
-                
-                // Use config file if it exists
-                if (File.Exists(_configPath))
-                {
-                    arguments.Append($"--config \"{_configPath}\" ");
-                }
+                var selectedConfigPath = string.IsNullOrWhiteSpace(configPath)
+                    ? _configPath
+                    : Path.GetFullPath(configPath);
+                ValidateConfigFile(selectedConfigPath);
 
-                arguments.Append($"\"{filePath}\"");
-
-                var process = new Process
+                var workingDirectory = Path.GetDirectoryName(Path.GetFullPath(filePath)) ?? Path.GetTempPath();
+                var literalFileArgument = $":./{Path.GetFileName(filePath)}";
+                var startInfo = new ProcessStartInfo
                 {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName = _nodeExePath,
-                        Arguments = arguments.ToString(),
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                        WorkingDirectory = Path.GetDirectoryName(filePath) ?? ""
-                    }
+                    FileName = _nodeExePath,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WorkingDirectory = workingDirectory
                 };
+                startInfo.ArgumentList.Add(_markdownLintPath);
+                startInfo.ArgumentList.Add(literalFileArgument);
+                startInfo.ArgumentList.Add("--config");
+                startInfo.ArgumentList.Add(selectedConfigPath);
+                startInfo.ArgumentList.Add("--fix");
 
-                var outputBuilder = new StringBuilder();
-                var errorBuilder = new StringBuilder();
-
-                process.OutputDataReceived += (sender, e) =>
+                using var process = new Process
                 {
-                    if (!string.IsNullOrEmpty(e.Data))
-                        outputBuilder.AppendLine(e.Data);
-                };
-
-                process.ErrorDataReceived += (sender, e) =>
-                {
-                    if (!string.IsNullOrEmpty(e.Data))
-                        errorBuilder.AppendLine(e.Data);
+                    StartInfo = startInfo
                 };
 
                 process.Start();
-                process.BeginOutputReadLine();
-                process.BeginErrorReadLine();
-
+                var outputTask = process.StandardOutput.ReadToEndAsync();
+                var errorTask = process.StandardError.ReadToEndAsync();
                 await process.WaitForExitAsync();
 
-                var output = outputBuilder.ToString();
-                var error = errorBuilder.ToString();
+                var output = await outputTask;
+                var error = await errorTask;
 
                 // Exit code 0 = success, 1 = lint errors found (but --fix applied what it could)
-                // Exit code > 1 = actual error
-                if (process.ExitCode > 1)
+                // Exit code 2 = execution or configuration error
+                if (process.ExitCode == 2)
                 {
                     return new LintResult
                     {
                         Success = false,
-                        ErrorMessage = error,
+                        ErrorMessage = GetFirstErrorLine(error, output),
+                        Output = output
+                    };
+                }
+
+                if (process.ExitCode != 0 && process.ExitCode != 1)
+                {
+                    return new LintResult
+                    {
+                        Success = false,
+                        ErrorMessage = $"markdownlint-cli2 exited with unexpected code {process.ExitCode}.",
                         Output = output
                     };
                 }
@@ -146,7 +159,9 @@ namespace OneNoteMarkdownExporter.Services
                 {
                     Success = true,
                     Output = output,
-                    WarningMessage = error // Lint warnings go to stderr
+                    WarningMessage = process.ExitCode == 1
+                        ? $"{output.Trim()}{Environment.NewLine}{error.Trim()}".Trim()
+                        : error.Trim()
                 };
             }
             catch (Exception ex)
@@ -154,7 +169,7 @@ namespace OneNoteMarkdownExporter.Services
                 return new LintResult
                 {
                     Success = false,
-                    ErrorMessage = $"Failed to run markdownlint-cli: {ex.Message}"
+                    ErrorMessage = $"Failed to run markdownlint-cli2: {ex.Message}"
                 };
             }
         }
@@ -164,39 +179,48 @@ namespace OneNoteMarkdownExporter.Services
         /// </summary>
         /// <param name="markdown">The markdown content to lint.</param>
         /// <returns>The linted markdown content.</returns>
-        public async Task<string> LintContentAsync(string markdown)
+        public async Task<LintResult> LintContentAsync(string markdown, string? configPath = null)
         {
             if (!_isAvailable)
             {
-                // Return original content if markdownlint-cli is not available
-                return markdown;
+                return new LintResult
+                {
+                    Success = false,
+                    Content = markdown,
+                    ErrorMessage = UnavailableReason
+                };
             }
 
-            // Create a temporary file
             var tempFile = Path.Combine(Path.GetTempPath(), $"mdlint_{Guid.NewGuid():N}.md");
 
             try
             {
-                // Write content to temp file
-                await File.WriteAllTextAsync(tempFile, markdown);
+                await File.WriteAllTextAsync(tempFile, markdown, new UTF8Encoding(false));
 
-                // Lint the file
-                var result = await LintFileAsync(tempFile);
+                var result = await LintFileAsync(tempFile, configPath);
 
                 if (result.Success)
                 {
-                    // Read back the linted content
-                    return await File.ReadAllTextAsync(tempFile);
+                    result.Content = await File.ReadAllTextAsync(tempFile);
                 }
                 else
                 {
-                    // Return original content if linting failed
-                    return markdown;
+                    result.Content = markdown;
                 }
+
+                return result;
+            }
+            catch (Exception ex)
+            {
+                return new LintResult
+                {
+                    Success = false,
+                    Content = markdown,
+                    ErrorMessage = $"Failed to run markdownlint-cli2: {ex.Message}"
+                };
             }
             finally
             {
-                // Clean up temp file
                 try
                 {
                     if (File.Exists(tempFile))
@@ -209,18 +233,48 @@ namespace OneNoteMarkdownExporter.Services
             }
         }
 
+        private static void ValidateConfigFile(string configPath)
+        {
+            if (!File.Exists(configPath))
+            {
+                throw new FileNotFoundException($"Markdown lint configuration not found at: {configPath}", configPath);
+            }
+
+            if (!Path.GetExtension(configPath).Equals(".json", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("Markdown lint configuration must be a JSON file.");
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(File.ReadAllText(configPath));
+            }
+            catch (JsonException ex)
+            {
+                throw new InvalidDataException($"Invalid Markdown lint configuration '{configPath}': {ex.Message}", ex);
+            }
+        }
+
+        private static string GetFirstErrorLine(string error, string output)
+        {
+            var message = string.IsNullOrWhiteSpace(error) ? output : error;
+            using var reader = new StringReader(message);
+            return reader.ReadLine()?.Trim() ?? "markdownlint-cli2 failed without an error message.";
+        }
+
         /// <summary>
         /// Synchronous version of LintContentAsync for compatibility.
         /// </summary>
-        public string LintContent(string markdown)
+        public LintResult LintContent(string markdown, string? configPath = null)
         {
-            return LintContentAsync(markdown).GetAwaiter().GetResult();
+            return LintContentAsync(markdown, configPath).GetAwaiter().GetResult();
         }
     }
 
     public class LintResult
     {
         public bool Success { get; set; }
+        public string Content { get; set; } = "";
         public string Output { get; set; } = "";
         public string ErrorMessage { get; set; } = "";
         public string WarningMessage { get; set; } = "";

@@ -280,9 +280,9 @@ namespace OneNoteMarkdownExporter
             ExportResult result;
             var generalFailureLogged = false;
 
-            if (options.ApplyLinting)
+            if (options.ApplyLinting && _exportService.IsMarkdownCliLinterAvailable)
             {
-                Log("Markdown linting enabled (markdownlint-cli)");
+                Log("Markdown linting enabled (markdownlint-cli2)");
             }
 
             var progress = new Progress<ExportProgressUpdate>(HandleExportProgress);

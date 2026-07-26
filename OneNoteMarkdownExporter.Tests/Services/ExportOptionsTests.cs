@@ -1,3 +1,4 @@
+using System.IO;
 using FluentAssertions;
 using OneNoteMarkdownExporter.Services;
 using Xunit;
@@ -298,6 +299,82 @@ public class ExportOptionsTests
 
         // Assert
         options.LintConfigPath.Should().BeNull();
+    }
+
+    [Fact]
+    public void Validate_WithValidLintConfig_NormalizesPath()
+    {
+        var configPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.markdownlint.json");
+        File.WriteAllText(configPath, "{\"default\":true}");
+        var options = new ExportOptions { LintConfigPath = configPath };
+
+        try
+        {
+            options.Validate();
+
+            options.LintConfigPath.Should().Be(Path.GetFullPath(configPath));
+        }
+        finally
+        {
+            File.Delete(configPath);
+        }
+    }
+
+    [Fact]
+    public void Validate_WithMissingLintConfig_ThrowsInvalidOperationException()
+    {
+        var configPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.markdownlint.json");
+        var options = new ExportOptions { LintConfigPath = configPath };
+
+        var act = () => options.Validate();
+
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage($"Markdown lint configuration not found at: {Path.GetFullPath(configPath)}");
+    }
+
+    [Fact]
+    public void Validate_WithNonJsonLintConfig_ThrowsInvalidOperationException()
+    {
+        var options = new ExportOptions { LintConfigPath = "custom.markdownlint.yaml" };
+
+        var act = () => options.Validate();
+
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("Markdown lint configuration must be a JSON file.");
+    }
+
+    [Fact]
+    public void Validate_WithMalformedLintConfig_ThrowsInvalidOperationException()
+    {
+        var configPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.markdownlint.json");
+        File.WriteAllText(configPath, "{ invalid json }");
+        var options = new ExportOptions { LintConfigPath = configPath };
+
+        try
+        {
+            var act = () => options.Validate();
+
+            act.Should().Throw<InvalidOperationException>()
+                .WithMessage("Invalid Markdown lint configuration*");
+        }
+        finally
+        {
+            File.Delete(configPath);
+        }
+    }
+
+    [Fact]
+    public void Validate_WithLintingDisabled_IgnoresLintConfig()
+    {
+        var options = new ExportOptions
+        {
+            ApplyLinting = false,
+            LintConfigPath = "missing.markdownlint.yaml"
+        };
+
+        var act = () => options.Validate();
+
+        act.Should().NotThrow();
     }
 
     [Fact]

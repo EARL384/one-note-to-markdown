@@ -26,13 +26,48 @@
     <PackageReference Include="Interop.Microsoft.Office.Interop.OneNote" Version="1.1.0.2" />
   </ItemGroup>
 
-  <!-- Copy resources folder (node.exe, node_modules, config) to output -->
+  <!-- Copy the committed Markdown linting runtime to build and publish output. -->
   <ItemGroup>
-    <None Include="resources\**\*" Exclude="resources\package.json;resources\package-lock.json">
+    <None Remove="resources\**\*" />
+    <None Include="resources\node.exe">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>resources\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      <Link>resources\node.exe</Link>
+    </None>
+    <None Include="resources\markdownlint-cli2.mjs">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      <Link>resources\markdownlint-cli2.mjs</Link>
+    </None>
+    <None Include="resources\.markdownlint.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      <Link>resources\.markdownlint.json</Link>
+    </None>
+    <None Include="resources\THIRD-PARTY-NOTICES.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      <Link>resources\THIRD-PARTY-NOTICES.txt</Link>
     </None>
   </ItemGroup>
+
+  <Target Name="ValidateMarkdownLintRuntime" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(MSBuildProjectDirectory)\resources\node.exe')" Text="Required Markdown linting runtime file is missing: resources\node.exe" />
+    <Error Condition="!Exists('$(MSBuildProjectDirectory)\resources\markdownlint-cli2.mjs')" Text="Required Markdown linting runtime file is missing: resources\markdownlint-cli2.mjs" />
+    <Error Condition="!Exists('$(MSBuildProjectDirectory)\resources\.markdownlint.json')" Text="Required Markdown linting runtime file is missing: resources\.markdownlint.json" />
+    <Error Condition="!Exists('$(MSBuildProjectDirectory)\resources\THIRD-PARTY-NOTICES.txt')" Text="Required Markdown linting runtime file is missing: resources\THIRD-PARTY-NOTICES.txt" />
+  </Target>
+
+  <Target Name="ValidatePublishedMarkdownLintRuntime" AfterTargets="Publish">
+    <Error Condition="!Exists('$(PublishDir)resources\node.exe')" Text="Published Markdown linting runtime file is missing: resources\node.exe" />
+    <Error Condition="!Exists('$(PublishDir)resources\markdownlint-cli2.mjs')" Text="Published Markdown linting runtime file is missing: resources\markdownlint-cli2.mjs" />
+    <Error Condition="!Exists('$(PublishDir)resources\.markdownlint.json')" Text="Published Markdown linting runtime file is missing: resources\.markdownlint.json" />
+    <Error Condition="!Exists('$(PublishDir)resources\THIRD-PARTY-NOTICES.txt')" Text="Published Markdown linting runtime file is missing: resources\THIRD-PARTY-NOTICES.txt" />
+  </Target>
 
   <!-- 
     COMReference is only needed for generating new interop assemblies from locally installed OneNote.

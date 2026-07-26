@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Text.Json;
 
 namespace OneNoteMarkdownExporter.Services
 {
@@ -45,7 +47,7 @@ namespace OneNoteMarkdownExporter.Services
         public bool Overwrite { get; set; } = false;
 
         /// <summary>
-        /// If true, apply Markdown linting/formatting to exported content using markdownlint-cli.
+        /// If true, apply Markdown linting/formatting to exported content using markdownlint-cli2.
         /// Linting errors are logged but do not prevent export.
         /// </summary>
         public bool ApplyLinting { get; set; } = true;
@@ -133,6 +135,31 @@ namespace OneNoteMarkdownExporter.Services
             if (AssetOrganizationMode != AssetOrganizationMode.Centralized && !string.IsNullOrWhiteSpace(AssetsFolderPath))
             {
                 throw new InvalidOperationException("Custom assets folder paths are only supported when asset organization is centralized.");
+            }
+
+            if (!ApplyLinting || string.IsNullOrWhiteSpace(LintConfigPath))
+            {
+                return;
+            }
+
+            LintConfigPath = Path.GetFullPath(LintConfigPath);
+            if (!Path.GetExtension(LintConfigPath).Equals(".json", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Markdown lint configuration must be a JSON file.");
+            }
+
+            if (!File.Exists(LintConfigPath))
+            {
+                throw new InvalidOperationException($"Markdown lint configuration not found at: {LintConfigPath}");
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(File.ReadAllText(LintConfigPath));
+            }
+            catch (JsonException ex)
+            {
+                throw new InvalidOperationException($"Invalid Markdown lint configuration '{LintConfigPath}': {ex.Message}", ex);
             }
         }
     }

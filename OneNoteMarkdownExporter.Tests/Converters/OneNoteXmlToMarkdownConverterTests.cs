@@ -33,6 +33,66 @@ public class OneNoteXmlToMarkdownConverterTests
     }
 
     [Fact]
+    public void Convert_EncodedComparisonCharacters_UsesReadableMarkdownText()
+    {
+        var xml = CreatePageXml("<one:T><![CDATA[This is plain text saying 2 &gt; 3 and 2 &lt; 3.]]></one:T>");
+
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        result.Should().Contain("2 > 3 and 2 < 3");
+    }
+
+    [Fact]
+    public void Convert_EncodedHtmlLikeText_DoesNotInterpretTags()
+    {
+        var xml = CreatePageXml("<one:T><![CDATA[Before &lt;br&gt; &lt;html&gt;&lt;/html&gt; &lt;a&gt;&lt;/a&gt; After]]></one:T>");
+
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        result.Should().Contain(@"Before \<br> \<html>\</html> \<a>\</a> After");
+        result.Should().NotContain("Before\n");
+    }
+
+    [Fact]
+    public void Convert_TestPageLiteralAngleText_MatchesReadableMarkdownSource()
+    {
+        var xml = CreatePageXml("<one:T><![CDATA[This is plain text with a bunch of opening and closing tags that aren't HTML, I just typed a bunch here: &lt;&gt; &lt;br&gt; &lt; &gt;&gt; &lt;&lt; &gt;&gt;&gt;&gt; &lt; &lt;html&gt;&lt;/html&gt; &lt;a&gt;&lt;/a&gt;  -- none of that is HTML from OneNote it's me just typing plain text HTML into a one note page.]]></one:T>");
+
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        result.Should().Be(@"This is plain text with a bunch of opening and closing tags that aren't HTML, I just typed a bunch here: <> \<br> < >> << >>>> < \<html>\</html> \<a>\</a>  -- none of that is HTML from OneNote it's me just typing plain text HTML into a one note page.");
+    }
+    [Fact]
+    public void Convert_EncodedHtmlLikeTextWithUrl_DoesNotRewriteLiteralTag()
+    {
+        var xml = CreatePageXml("<one:T><![CDATA[Example: &lt;a href=&quot;https://example.com&quot;&gt;Link&lt;/a&gt;]]></one:T>");
+
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        result.Should().Contain("\\<a href=\"https://example.com\">Link\\</a>");
+        result.Should().NotContain("<https://example.com");
+    }
+
+    [Fact]
+    public void Convert_EncodedHtmlCommentAndDeclaration_EscapesMarkdownHtmlStarts()
+    {
+        var xml = CreatePageXml("<one:T><![CDATA[&lt;!-- comment --&gt; &lt;!DOCTYPE html&gt; &lt;?target value?&gt;]]></one:T>");
+
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        result.Should().Be(@"\<!-- comment --> \<!DOCTYPE html> \<?target value?>");
+    }
+
+    [Fact]
+    public void Convert_EncodedGreaterThanAtLineStart_DoesNotCreateBlockquote()
+    {
+        var xml = CreatePageXml("<one:T><![CDATA[&gt; Literal greater-than text]]></one:T>");
+
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        result.Should().Be(@"\> Literal greater-than text");
+    }
+    [Fact]
     public void Convert_PageWithTitle_IncludesH1Heading()
     {
         // Arrange
@@ -53,6 +113,22 @@ public class OneNoteXmlToMarkdownConverterTests
 
         // Assert
         result.Should().Contain("# My Page Title");
+    }
+
+    [Fact]
+    public void Convert_PageTitleWithEncodedHtmlLikeText_PreservesSafeText()
+    {
+        var xml = @"<?xml version=""1.0""?>
+            <one:Page xmlns:one=""http://schemas.microsoft.com/office/onenote/2013/onenote"">
+                <one:Title>
+                    <one:OE><one:T><![CDATA[Title &lt;html&gt; &amp; Friends]]></one:T></one:OE>
+                </one:Title>
+            </one:Page>";
+
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        result.Should().Contain(@"# Title \<html> & Friends");
+        result.Should().NotContain("&lt;");
     }
 
     [Fact]
@@ -88,6 +164,16 @@ public class OneNoteXmlToMarkdownConverterTests
     }
 
     [Fact]
+    public void Convert_RawStrongElement_ConvertsToBold()
+    {
+        var xml = CreatePageXml("<one:T><![CDATA[<strong>Strong Text</strong>]]></one:T>");
+
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        result.Should().Contain("**Strong Text**");
+    }
+
+    [Fact]
     public void Convert_ItalicText_ConvertsToEmphasis()
     {
         // Arrange - Use single quotes for style attribute (OneNote format)
@@ -114,6 +200,17 @@ public class OneNoteXmlToMarkdownConverterTests
     }
 
     [Fact]
+    public void Convert_StyledEncodedHtmlLikeText_PreservesLiteralTag()
+    {
+        var xml = CreatePageXmlWithStyle("Literal &lt;br&gt; text", "font-weight:bold");
+
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        result.Should().Contain(@"**Literal \<br> text**");
+        result.Should().NotContain("Literal\n");
+    }
+
+    [Fact]
     public void Convert_HighlightedText_ConvertsToBold()
     {
         // Arrange - highlighted text has background color (single quotes)
@@ -129,16 +226,53 @@ public class OneNoteXmlToMarkdownConverterTests
     [Fact]
     public void Convert_BoldAndItalic_PreservesBothFormats()
     {
-        // Arrange - Use single quotes for style attribute (OneNote format)
         var xml = CreatePageXml("<one:T><![CDATA[<span style='font-weight:bold;font-style:italic'>Bold Italic</span>]]></one:T>");
 
-        // Act
         var result = _converter.Convert(xml, "", "assets", null, "test");
 
-        // Assert
-        // Should contain both bold and italic markers
-        result.Should().Contain("**");
-        result.Should().Contain("*");
+        result.Should().Be("***Bold Italic***");
+    }
+
+    [Fact]
+    public void Convert_BoldItalicAndHighlighted_PreservesBoldAndItalic()
+    {
+        var xml = CreatePageXml("<one:T><![CDATA[<span style='font-weight:bold;font-style:italic;background:yellow;mso-highlight:yellow'>Styled Text</span>]]></one:T>");
+
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        result.Should().Be("***Styled Text***");
+    }
+
+    [Fact]
+    public void Convert_NestedBoldAndItalicSpans_PreservesBothFormats()
+    {
+        var xml = CreatePageXml("<one:T><![CDATA[<span style='font-weight:bold'><span style='font-style:italic'>Nested Text</span></span>]]></one:T>");
+
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        result.Should().Be("***Nested Text***");
+    }
+
+    [Fact]
+    public void Convert_LinkInsideBoldSpan_PreservesLinkAndFormatting()
+    {
+        var xml = CreatePageXml("<one:T><![CDATA[<span style='font-weight:bold'><a href='https://example.com'>Example</a></span>]]></one:T>");
+
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        result.Should().Be("**[Example](https://example.com)**");
+    }
+
+    [Fact]
+    public void Convert_TextWithEmbeddedBreak_CreatesProseLineBreak()
+    {
+        var xml = CreatePageXml("<one:T><![CDATA[First line<br/>Second line]]></one:T>");
+
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        result.Should().Contain("First line\nSecond line");
+        result.Should().NotContain("<br>");
+        result.Should().NotContain("<br/>");
     }
 
     #endregion
@@ -336,8 +470,8 @@ public class OneNoteXmlToMarkdownConverterTests
     [Fact]
     public void Convert_ExistingAutolink_DoesNotDoubleWrap()
     {
-        // Arrange
-        var xml = CreatePageXml(@"<one:T><![CDATA[Visit <https://example.com>]]></one:T>");
+        // OneNote entity-encodes angle brackets typed by the user.
+        var xml = CreatePageXml(@"<one:T><![CDATA[Visit &lt;https://example.com&gt;]]></one:T>");
 
         // Act
         var result = _converter.Convert(xml, "", "assets", null, "test");
@@ -374,6 +508,17 @@ public class OneNoteXmlToMarkdownConverterTests
         result.Should().Contain("https://example.com/path?query=value&other=123");
     }
 
+    [Fact]
+    public void Convert_LinkWithEncodedAmpersand_DecodesMarkdownDestination()
+    {
+        var xml = CreatePageXml(@"<one:T><![CDATA[<a href=""https://example.com/?first=1&amp;second=2"">Link</a>]]></one:T>");
+
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        result.Should().Contain("[Link](https://example.com/?first=1&second=2)");
+        result.Should().NotContain("&amp;");
+    }
+
     #endregion
 
     #region Table Tests
@@ -408,6 +553,67 @@ public class OneNoteXmlToMarkdownConverterTests
         // Assert - ReverseMarkdown converts tables to Markdown format
         result.Should().Contain("|");
         result.Should().Contain("---");
+    }
+
+    [Fact]
+    public void Convert_TableCellWithMultipleParagraphs_KeepsRowOnSingleLine()
+    {
+        var xml = @"<?xml version=""1.0""?>
+            <one:Page xmlns:one=""http://schemas.microsoft.com/office/onenote/2013/onenote"">
+                <one:Outline>
+                    <one:OEChildren>
+                        <one:OE>
+                            <one:Table>
+                                <one:Row>
+                                    <one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Topic]]></one:T></one:OE></one:OEChildren></one:Cell>
+                                    <one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Details]]></one:T></one:OE></one:OEChildren></one:Cell>
+                                </one:Row>
+                                <one:Row>
+                                    <one:Cell>
+                                        <one:OEChildren>
+                                            <one:OE><one:T><![CDATA[First paragraph]]></one:T></one:OE>
+                                            <one:OE><one:T><![CDATA[Second paragraph]]></one:T></one:OE>
+                                        </one:OEChildren>
+                                    </one:Cell>
+                                    <one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Value]]></one:T></one:OE></one:OEChildren></one:Cell>
+                                </one:Row>
+                            </one:Table>
+                        </one:OE>
+                    </one:OEChildren>
+                </one:Outline>
+            </one:Page>";
+
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        result.Should().Contain("| First paragraph<br>Second paragraph | Value |");
+    }
+
+    [Fact]
+    public void Convert_TableCellWithEmbeddedBreak_KeepsRowOnSingleLine()
+    {
+        var xml = @"<?xml version=""1.0""?>
+            <one:Page xmlns:one=""http://schemas.microsoft.com/office/onenote/2013/onenote"">
+                <one:Outline>
+                    <one:OEChildren>
+                        <one:OE>
+                            <one:Table>
+                                <one:Row>
+                                    <one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Topic]]></one:T></one:OE></one:OEChildren></one:Cell>
+                                    <one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Details]]></one:T></one:OE></one:OEChildren></one:Cell>
+                                </one:Row>
+                                <one:Row>
+                                    <one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Name]]></one:T></one:OE></one:OEChildren></one:Cell>
+                                    <one:Cell><one:OEChildren><one:OE><one:T><![CDATA[<span>First line<br/>Second line</span>]]></one:T></one:OE></one:OEChildren></one:Cell>
+                                </one:Row>
+                            </one:Table>
+                        </one:OE>
+                    </one:OEChildren>
+                </one:Outline>
+            </one:Page>";
+
+        var result = _converter.Convert(xml, "", "assets", null, "test");
+
+        result.Should().Contain("| Name | First line<br>Second line |");
     }
 
     #endregion

@@ -1,15 +1,12 @@
 {
-  "name": "resources",
+  "name": "onenote-markdown-exporter-resources",
   "version": "1.0.0",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
+  "private": true,
+  "type": "module",
   "dependencies": {
-    "markdownlint-cli": "^0.46.0"
+    "markdownlint-cli2": "0.23.1"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "0.44.1"
   }
 }

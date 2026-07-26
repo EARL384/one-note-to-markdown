@@ -37,7 +37,7 @@ Go to [GitHub Releases](https://github.com/segunak/one-note-to-markdown/releases
 - **Asset organization modes** - Store assets centrally, per notebook, per section, or per page
 - **Date preservation** - Exported Markdown files keep OneNote created and modified timestamps
 - **Sync-friendly** - "Overwrite existing files" option keeps exports in sync with your notes
-- **Markdown linting** - Automatic cleanup via bundled markdownlint-cli (configurable)
+- **Markdown linting** - Automatic cleanup via bundled markdownlint-cli2 (configurable)
 
 ## Usage
 
@@ -116,7 +116,7 @@ OneNoteMarkdownExporter.exe --help
 
 | Option | Description |
 |--------|-------------|
-| `--no-lint` | Disable Markdown linting (markdownlint-cli) |
+| `--no-lint` | Disable Markdown linting (markdownlint-cli2) |
 | `--lint-config <path>` | Path to custom `.markdownlint.json` configuration file |
 
 #### Dates
@@ -251,15 +251,17 @@ Exported folder and file names are made safe for Windows. Invalid filename chara
 
 ## Markdown Linting
 
-The app uses [markdownlint-cli](https://github.com/DavidAnson/markdownlint-cli) for Markdown linting. Node.js and all dependencies are bundled, so it works out of the box with no additional setup.
+The app uses [markdownlint-cli2](https://github.com/DavidAnson/markdownlint-cli2) for Markdown linting. Node.js and the CLI bundle are included, so it works out of the box with no additional setup.
 
 - **Enabled by default** - Can be toggled off in the UI or with `--no-lint` in CLI
 - **Non-blocking** - If linting fails, the error is logged and export continues with the unlinted content
-- **Configurable** - Edit `.markdownlint.json` to customize rules
+- **Configurable** - Edit the bundled `.markdownlint.json`, or pass another `.json` file with `--lint-config`
 
 ### Configuration
 
 Click "Edit .markdownlint.json..." in the UI or find the file in the `resources` folder. The default configuration:
+
+Only JSON rule configuration is supported. YAML, TOML, JavaScript configuration, plugins, and custom rules are not supported.
 
 ```json
 {
@@ -273,6 +275,7 @@ Click "Edit .markdownlint.json..." in the UI or find the file in the `resources`
   "MD018": false,
   "MD036": false,
   "MD049": false,
+  "MD059": false,
   "MD041": false
 }
 ```
@@ -289,6 +292,7 @@ Click "Edit .markdownlint.json..." in the UI or find the file in the `resources`
 | **MD018** | No space after hash in heading | Edge cases in conversion |
 | **MD036** | Emphasis instead of heading | Style choice |
 | **MD049** | Consistent emphasis style | Mixed styles in source content |
+| **MD059** | Link text should be descriptive | The exporter preserves the user's wording instead of judging prose |
 
 ## Technical Details
 

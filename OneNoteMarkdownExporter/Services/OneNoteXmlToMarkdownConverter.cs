@@ -30,6 +30,9 @@ namespace OneNoteMarkdownExporter.Services
         private string _relativeAssetsPath = "";
         private string _pagePrefix = "";
         private int _imageCounter = 0;
+        private string _literalAnglePlaceholderPrefix = "";
+        private int _literalAnglePlaceholderCounter = 0;
+        private readonly Dictionary<string, string> _literalAnglePlaceholders = new();
         private BinaryContentFetcher? _binaryContentFetcher;
 
         public OneNoteXmlToMarkdownConverter()
@@ -50,6 +53,9 @@ namespace OneNoteMarkdownExporter.Services
             _relativeAssetsPath = relativeAssetsPath;
             _pagePrefix = SanitizePrefix(pagePrefix);
             _imageCounter = 0;
+            _literalAnglePlaceholderPrefix = $"ONENOTELITERAL{Guid.NewGuid():N}";
+            _literalAnglePlaceholderCounter = 0;
+            _literalAnglePlaceholders.Clear();
             _binaryContentFetcher = binaryContentFetcher;
 
             var doc = XDocument.Parse(pageXml);
@@ -296,102 +302,168 @@ namespace OneNoteMarkdownExporter.Services
 
         private string ProcessTextElement(XElement t)
         {
-            // Get raw text - may be in CDATA or direct
-            string rawText = "";
-            
             var cdata = t.Nodes().OfType<XCData>().FirstOrDefault();
-            if (cdata != null)
-            {
-                rawText = cdata.Value;
-            }
-            else
-            {
-                rawText = t.Value;
-            }
+            var rawText = cdata?.Value ?? t.Value;
 
             if (string.IsNullOrEmpty(rawText)) return "";
 
-            // Always normalize anchor tags first, regardless of other HTML detection
-            // This catches <a\nhref=... patterns where the tag spans lines
-            if (rawText.Contains("<a"))
-            {
-                // Normalize anchor tags - collapse any whitespace after <a to single space
-                rawText = Regex.Replace(rawText,
-                    @"<a\s+",
-                    "<a ",
-                    RegexOptions.IgnoreCase | RegexOptions.Singleline);
-            }
-
-            // If text contains HTML (from OneNote's rich text), pass it through
-            // ReverseMarkdown will handle the conversion
-            if (rawText.Contains("<span") || rawText.Contains("<a ") || rawText.Contains("<b>") || rawText.Contains("<i>"))
-            {
-                // Clean up OneNote's span styles to simpler HTML
-                rawText = ConvertOneNoteStylesToHtml(rawText);
-                return rawText;
-            }
-
-            // Apply inline styles from T element
+            var html = ConvertOneNoteStylesToHtml(rawText);
             var style = t.Attribute("style")?.Value ?? "";
-            
-            // Escape plain text for HTML
-            var escaped = System.Net.WebUtility.HtmlEncode(rawText);
-            
+
             if (style.Contains("font-weight:bold"))
             {
-                escaped = $"<strong>{escaped}</strong>";
+                html = $"<strong>{html}</strong>";
             }
             if (style.Contains("font-style:italic"))
             {
-                escaped = $"<em>{escaped}</em>";
+                html = $"<em>{html}</em>";
             }
             if (style.Contains("text-decoration:line-through"))
             {
-                escaped = $"<del>{escaped}</del>";
+                html = $"<del>{html}</del>";
             }
 
-            return escaped;
+            return html;
         }
         private string ConvertOneNoteStylesToHtml(string html)
         {
-            // Convert OneNote's inline styles to standard HTML tags
-            
-            // Handle ALL background colors as highlights -> convert to bold
-            // This covers: background:#HEXVAL, background: #HEXVAL, background:yellow, etc.
-            // Process this FIRST before bold, so highlighted text becomes bold
-            // Use (.*?) with Singleline to handle nested HTML content
-            html = Regex.Replace(html,
-                @"<span[^>]*style='[^']*background\s*:\s*#?[a-zA-Z0-9]+[^']*'[^>]*>(.*?)</span>",
-                "<strong>$1</strong>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            var fragment = new HtmlAgilityPack.HtmlDocument();
+            fragment.LoadHtml(html);
 
-            // font-weight:bold -> <strong>
-            // First try simple content (no nested tags) - this is the common case
-            html = Regex.Replace(html, 
-                @"<span[^>]*style='[^']*font-weight:\s*bold[^']*'[^>]*>([^<]*)</span>",
-                "<strong>$1</strong>", RegexOptions.IgnoreCase);
-            // Then handle nested content (e.g., bold text with links inside)
-            html = Regex.Replace(html, 
-                @"<span[^>]*style='[^']*font-weight:\s*bold[^']*'[^>]*>(.*?)</span>",
-                "<strong>$1</strong>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
-            
-            // font-style:italic -> <em>
-            // First try simple content (no nested tags) - this is the common case
-            html = Regex.Replace(html,
-                @"<span[^>]*style='[^']*font-style:\s*italic[^']*'[^>]*>([^<]*)</span>",
-                "<em>$1</em>", RegexOptions.IgnoreCase);
-            // Then handle nested content (e.g., italic text with links inside)
-            html = Regex.Replace(html,
-                @"<span[^>]*style='[^']*font-style:\s*italic[^']*'[^>]*>(.*?)</span>",
-                "<em>$1</em>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            foreach (var span in fragment.DocumentNode.Descendants("span").Reverse().ToList())
+            {
+                var styles = ParseStyles(span.GetAttributeValue("style", ""));
+                var tags = new List<string>();
 
-            // Remove remaining span tags but keep content
-            html = Regex.Replace(html, @"<span[^>]*>", "");
-            html = Regex.Replace(html, @"</span>", "");
+                if (styles.ContainsKey("background")
+                    || styles.TryGetValue("font-weight", out var fontWeight) && fontWeight.Equals("bold", StringComparison.OrdinalIgnoreCase))
+                {
+                    tags.Add("strong");
+                }
+                if (styles.TryGetValue("font-style", out var fontStyle) && fontStyle.Equals("italic", StringComparison.OrdinalIgnoreCase))
+                {
+                    tags.Add("em");
+                }
+                if (styles.TryGetValue("text-decoration", out var textDecoration)
+                    && textDecoration.Contains("line-through", StringComparison.OrdinalIgnoreCase))
+                {
+                    tags.Add("del");
+                }
 
-            // Clean up mso- styles (Microsoft Office specific)
-            html = Regex.Replace(html, @"mso-[^;""']+[;]?", "");
+                if (tags.Count == 0)
+                {
+                    span.ParentNode.RemoveChild(span, true);
+                    continue;
+                }
 
-            return html;
+                span.Name = tags[0];
+                span.Attributes.RemoveAll();
+                var current = span;
+
+                foreach (var tag in tags.Skip(1))
+                {
+                    var wrapper = fragment.CreateElement(tag);
+                    foreach (var child in current.ChildNodes.ToList())
+                    {
+                        current.RemoveChild(child);
+                        wrapper.AppendChild(child);
+                    }
+                    current.AppendChild(wrapper);
+                    current = wrapper;
+                }
+            }
+
+            ProtectLiteralAngleBrackets(fragment);
+
+            return fragment.DocumentNode.InnerHtml;
+        }
+
+        private void ProtectLiteralAngleBrackets(HtmlAgilityPack.HtmlDocument fragment)
+        {
+            foreach (var textNode in fragment.DocumentNode.Descendants().OfType<HtmlTextNode>().ToList())
+            {
+                var text = HtmlEntity.DeEntitize(textNode.Text);
+                textNode.Text = System.Net.WebUtility.HtmlEncode(ProtectLiteralPlainText(text));
+            }
+        }
+
+        private string CreateLiteralAnglePlaceholder(string kind, string replacement)
+        {
+            var placeholder = $"{_literalAnglePlaceholderPrefix}{kind}{_literalAnglePlaceholderCounter++}END";
+            _literalAnglePlaceholders.Add(placeholder, replacement);
+            return placeholder;
+        }
+
+        private static bool ShouldEscapeLiteralLessThan(string text, int startIndex)
+        {
+            var endIndex = FindClosingAngleBracket(text, startIndex + 1);
+            if (endIndex < 0)
+            {
+                return false;
+            }
+
+            var candidate = text[startIndex..(endIndex + 1)];
+            if (candidate.StartsWith("<!--", StringComparison.Ordinal)
+                || candidate.StartsWith("<?", StringComparison.Ordinal)
+                || candidate.StartsWith("<![CDATA[", StringComparison.OrdinalIgnoreCase)
+                || candidate.Length > 2 && candidate[1] == '!' && char.IsAsciiLetterUpper(candidate[2]))
+            {
+                return true;
+            }
+
+            return Regex.IsMatch(
+                candidate,
+                @"^(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^\""'=<>`\s]+|'[^']*'|\""[^\""']*\""))?)*\s*/?>|</[A-Za-z][A-Za-z0-9-]*\s*>)$",
+                RegexOptions.Singleline);
+        }
+
+        private static int FindClosingAngleBracket(string text, int startIndex)
+        {
+            char? quote = null;
+
+            for (var index = startIndex; index < text.Length; index++)
+            {
+                var character = text[index];
+                if (quote.HasValue)
+                {
+                    if (character == quote.Value)
+                    {
+                        quote = null;
+                    }
+                }
+                else if (character is '\'' or '"')
+                {
+                    quote = character;
+                }
+                else if (character == '>')
+                {
+                    return index;
+                }
+            }
+
+            return -1;
+        }
+
+        private static bool ShouldEscapeLiteralGreaterThan(string text, int index)
+        {
+            var lineStart = index > 0 ? text.LastIndexOf('\n', index - 1) + 1 : 0;
+            return text.AsSpan(lineStart, index - lineStart).Trim().IsEmpty;
+        }
+
+        private static Dictionary<string, string> ParseStyles(string style)
+        {
+            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var declaration in style.Split(';', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var parts = declaration.Split(':', 2);
+                if (parts.Length == 2)
+                {
+                    result[parts[0].Trim()] = parts[1].Trim();
+                }
+            }
+
+            return result;
         }
 
         private void ProcessImage(XElement image, StringBuilder html)
@@ -530,25 +602,63 @@ namespace OneNoteMarkdownExporter.Services
             {
                 var cdata = t.Nodes().OfType<XCData>().FirstOrDefault();
                 var text = cdata?.Value ?? t.Value;
-                
-                // Strip HTML tags
-                text = Regex.Replace(text, "<[^>]+>", "");
-                sb.Append(text);
+
+                var fragment = new HtmlAgilityPack.HtmlDocument();
+                fragment.LoadHtml(text);
+                sb.Append(ProtectLiteralPlainText(HtmlEntity.DeEntitize(fragment.DocumentNode.InnerText)));
             }
             return sb.ToString();
         }
 
+        private string ProtectLiteralPlainText(string text)
+        {
+            var protectedText = new StringBuilder(text.Length);
+
+            for (var index = 0; index < text.Length; index++)
+            {
+                if (text[index] == '<')
+                {
+                    var endIndex = FindClosingAngleBracket(text, index + 1);
+                    if (endIndex >= 0)
+                    {
+                        var candidate = text[index..(endIndex + 1)];
+                        if (IsLiteralHttpAutolink(candidate))
+                        {
+                            protectedText.Append(CreateLiteralAnglePlaceholder("AUTOLINK", candidate));
+                            index = endIndex;
+                            continue;
+                        }
+                        if (ShouldEscapeLiteralLessThan(text, index))
+                        {
+                            protectedText.Append(CreateLiteralAnglePlaceholder("HTML", $"\\{candidate}"));
+                            index = endIndex;
+                            continue;
+                        }
+                    }
+
+                    protectedText.Append(CreateLiteralAnglePlaceholder("LT", "<"));
+                }
+                else if (text[index] == '>')
+                {
+                    var replacement = ShouldEscapeLiteralGreaterThan(text, index) ? @"\>" : ">";
+                    protectedText.Append(CreateLiteralAnglePlaceholder("GT", replacement));
+                }
+                else
+                {
+                    protectedText.Append(text[index]);
+                }
+            }
+
+            return protectedText.ToString();
+        }
+
+        private static bool IsLiteralHttpAutolink(string candidate)
+        {
+            return Regex.IsMatch(candidate, @"^<https?://[^\s<>]+>$", RegexOptions.IgnoreCase);
+        }
+
         private string CleanupMarkdown(string markdown)
         {
-            // Convert <br> and <br/> tags to proper line breaks FIRST
-            // These can appear in tables and regular content
-            // Handle all variations: <br>, <br/>, <br />, <br  />, <BR>, etc.
-            // Also handle versions with attributes like <br style="...">
-            markdown = Regex.Replace(markdown, @"<br[^>]*/?>", "\n", RegexOptions.IgnoreCase);
-            
-            // Also handle HTML-encoded versions that might slip through
-            markdown = Regex.Replace(markdown, @"&lt;br[^&]*/?&gt;", "\n", RegexOptions.IgnoreCase);
-
             // Aggressively find and convert ALL <a>...</a> tags to Markdown links
             // This regex handles any whitespace/newlines within the tag
             markdown = ConvertAllAnchorTags(markdown);
@@ -559,7 +669,7 @@ namespace OneNoteMarkdownExporter.Services
                 @"\]\(([^)]+)\)",
                 match => {
                     var url = match.Groups[1].Value;
-                    url = url.Replace("\\_", "_");
+                    url = HtmlEntity.DeEntitize(url).Replace("\\_", "_");
                     return $"]({url})";
                 });
 
@@ -601,13 +711,6 @@ namespace OneNoteMarkdownExporter.Services
             // Remove excessive blank lines
             markdown = Regex.Replace(markdown, @"\n{3,}", "\n\n");
             
-            // Clean up HTML entities that might have slipped through
-            markdown = markdown.Replace("&nbsp;", " ");
-            markdown = markdown.Replace("&amp;", "&");
-            markdown = markdown.Replace("&lt;", "<");
-            markdown = markdown.Replace("&gt;", ">");
-            markdown = markdown.Replace("&quot;", "\"");
-
             markdown = WrapBareUrls(markdown);
             
             // Remove empty paragraphs
@@ -620,15 +723,23 @@ namespace OneNoteMarkdownExporter.Services
                 lines[i] = lines[i].TrimEnd();
             }
             
-            return string.Join("\n", lines).Trim();
+            markdown = string.Join("\n", lines).Trim();
+
+            foreach (var placeholder in _literalAnglePlaceholders)
+            {
+                markdown = markdown.Replace(placeholder.Key, placeholder.Value, StringComparison.Ordinal);
+            }
+
+            return markdown;
         }
 
-        private static string WrapBareUrls(string markdown)
+        private string WrapBareUrls(string markdown)
         {
             return Regex.Replace(markdown,
                 @"https?://[^\s<>\]]+",
                 match => {
-                    if (IsAlreadyAutolink(markdown, match.Index) || IsMarkdownLinkDestination(markdown, match.Index))
+                    if (IsAlreadyAutolink(markdown, match.Index)
+                        || IsMarkdownLinkDestination(markdown, match.Index))
                     {
                         return match.Value;
                     }

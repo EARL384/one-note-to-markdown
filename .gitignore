@@ -5,5 +5,5 @@ obj/
 
 local/
 
-# Node.js dependencies for markdownlint-cli
+# Build-only dependencies for updating the bundled markdownlint-cli2 runtime
 node_modules/

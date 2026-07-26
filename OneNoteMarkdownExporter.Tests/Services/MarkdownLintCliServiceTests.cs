@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.IO;
+using System.Text;
 using FluentAssertions;
 using OneNoteMarkdownExporter.Services;
 using Xunit;
@@ -5,147 +8,241 @@ using Xunit;
 namespace OneNoteMarkdownExporter.Tests.Services
 {
     /// <summary>
-    /// Integration tests for MarkdownLintCliService.
-    /// These tests verify that the bundled markdownlint-cli works correctly.
+    /// Integration tests for the committed markdownlint-cli2 runtime.
     /// </summary>
     public class MarkdownLintCliServiceTests
     {
         [Fact]
         public void IsAvailable_ShouldBeTrue_WhenResourcesExist()
         {
-            // Arrange & Act
             var service = new MarkdownLintCliService();
 
-            // Assert
-            // Note: This test may fail if resources aren't copied during test build
-            // The IsAvailable property depends on finding node.exe and markdownlint-cli
-            if (!service.IsAvailable)
-            {
-                // Skip if resources not available (CI environment without resources)
-                return;
-            }
-            
             service.IsAvailable.Should().BeTrue($"because resources should exist: {service.UnavailableReason}");
         }
 
         [Fact]
-        public void LintContent_ShouldAddTrailingNewline_WhenMD047Enabled()
+        public void BundledNode_ShouldBePinnedVersion()
         {
-            // Arrange
-            var service = new MarkdownLintCliService();
-            if (!service.IsAvailable)
+            var startInfo = new ProcessStartInfo
             {
-                // Skip if resources not available
-                return;
-            }
+                FileName = Path.Combine(GetResourcesPath(), "node.exe"),
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            startInfo.ArgumentList.Add("--version");
 
-            // Content without trailing newline
-            var contentWithoutNewline = "# Test\n\nSome content";
+            using var process = Process.Start(startInfo);
+            process.Should().NotBeNull();
+            var output = process!.StandardOutput.ReadToEnd();
+            process.WaitForExit();
 
-            // Act
-            var result = service.LintContent(contentWithoutNewline);
+            process.ExitCode.Should().Be(0);
+            output.Trim().Should().Be("v26.5.0");
+        }
 
-            // Assert - MD047 requires files to end with a single newline
-            result.Should().EndWith("\n", "because MD047 requires a trailing newline");
+        [Fact]
+        public void Runtime_ShouldNotRequireNodeModules()
+        {
+            File.Exists(Path.Combine(GetResourcesPath(), "markdownlint-cli2.mjs")).Should().BeTrue();
+            Directory.Exists(Path.Combine(GetResourcesPath(), "node_modules")).Should().BeFalse();
+        }
+
+        [Fact]
+        public void LintContent_ShouldAddExactlyOneTrailingNewline_WhenMD047Enabled()
+        {
+            var service = new MarkdownLintCliService();
+
+            var result = service.LintContent("# Test\n\nSome content");
+
+            result.Success.Should().BeTrue();
+            result.Content.Should().EndWith("content\n");
+            result.Content.Should().NotEndWith("content\n\n");
         }
 
         [Fact]
         public void LintContent_ShouldWrapBareUrls_WhenMD034Enabled()
         {
-            // Arrange
             var service = new MarkdownLintCliService();
-            if (!service.IsAvailable)
-            {
-                // Skip if resources not available
-                return;
-            }
-
-            // Content with bare URL
             var contentWithBareUrl = "# Test\n\nCheck out https://example.com for more info.\n";
 
-            // Act
             var result = service.LintContent(contentWithBareUrl);
 
-            // Assert - MD034 should wrap bare URLs in angle brackets
-            result.Should().Contain("<https://example.com>", "because MD034 wraps bare URLs in angle brackets");
-            result.Should().NotContain(" https://example.com ", "because the bare URL should be wrapped");
+            result.Success.Should().BeTrue();
+            result.Content.Should().Contain("<https://example.com>");
+            result.Content.Should().NotContain(" https://example.com ");
         }
 
         [Fact]
-        public void LintContent_ShouldReturnOriginal_WhenServiceUnavailable()
+        public void LintContent_ShouldReturnFailureAndOriginalContent_WhenServiceUnavailable()
         {
-            // This test verifies the fallback behavior
-            // We can't easily mock the service being unavailable, but we can verify
-            // that valid content passes through unchanged if no fixes needed
-            
-            var service = new MarkdownLintCliService();
-            if (!service.IsAvailable)
+            var resourcesPath = CreateTempDirectory();
+            try
             {
-                // When unavailable, should return original content
+                var service = new MarkdownLintCliService(resourcesPath);
                 var original = "# Test\n\nContent\n";
+
                 var result = service.LintContent(original);
-                result.Should().Be(original);
+
+                service.IsAvailable.Should().BeFalse();
+                result.Success.Should().BeFalse();
+                result.Content.Should().Be(original);
+                result.ErrorMessage.Should().Contain("node.exe not found");
+            }
+            finally
+            {
+                Directory.Delete(resourcesPath, true);
             }
         }
 
         [Fact]
         public void LintContent_ShouldHandleEmptyContent()
         {
-            // Arrange
             var service = new MarkdownLintCliService();
-            if (!service.IsAvailable)
-            {
-                return;
-            }
 
-            // Act
             var result = service.LintContent("");
 
-            // Assert - empty content returns empty (no content to lint)
-            // This is expected behavior - markdownlint doesn't add content to empty files
-            result.Should().BeEmpty("because empty input produces empty output");
+            result.Success.Should().BeTrue();
+            result.Content.Should().BeEmpty();
         }
 
         [Fact]
-        public void LintContent_ShouldNotDoubleNewlines()
+        public void LintContent_ShouldHonorCustomJsonConfiguration()
         {
-            // Arrange
             var service = new MarkdownLintCliService();
-            if (!service.IsAvailable)
+            var directory = CreateTempDirectory("markdownlint config ");
+            var configPath = Path.Combine(directory, "custom.markdownlint.json");
+            File.WriteAllText(configPath, "{\"default\":true,\"MD034\":false,\"MD047\":false}");
+            var markdown = "# Test\n\nVisit https://example.com";
+
+            try
             {
-                return;
+                var result = service.LintContent(markdown, configPath);
+
+                result.Success.Should().BeTrue();
+                result.Content.Should().Be(markdown);
             }
-
-            // Content that already has trailing newline
-            var contentWithNewline = "# Test\n\nSome content\n";
-
-            // Act
-            var result = service.LintContent(contentWithNewline);
-
-            // Assert - should not add extra newlines
-            result.Should().EndWith("content\n", "because content already had proper trailing newline");
-            result.Should().NotEndWith("content\n\n", "because it should not add extra newlines");
+            finally
+            {
+                Directory.Delete(directory, true);
+            }
         }
 
         [Fact]
-        public async Task LintContentAsync_ShouldApplyFixes()
+        public void LintContent_ShouldIgnoreNonDescriptiveLinkTextByDefault()
         {
-            // Arrange
             var service = new MarkdownLintCliService();
-            if (!service.IsAvailable)
+            var markdown = "# Test\n\nRead more [here](https://example.com).\n";
+
+            var result = service.LintContent(markdown);
+
+            result.Success.Should().BeTrue();
+            result.Content.Should().Contain("[here](https://example.com)");
+            result.WarningMessage.Should().BeEmpty();
+        }
+
+        [Fact]
+        public void LintContent_ShouldAllowCustomConfigurationToEnableMD059()
+        {
+            var service = new MarkdownLintCliService();
+            var directory = CreateTempDirectory();
+            var configPath = Path.Combine(directory, "enable-md059.markdownlint.json");
+            File.WriteAllText(configPath, "{\"default\":false,\"MD059\":true}");
+
+            try
             {
-                return;
+                var result = service.LintContent("# Test\n\nRead more [here](https://example.com).\n", configPath);
+
+                result.Success.Should().BeTrue();
+                result.WarningMessage.Should().Contain("MD059");
             }
+            finally
+            {
+                Directory.Delete(directory, true);
+            }
+        }
 
-            // Content with multiple violations
-            var badContent = "# Test\n\nVisit https://example.com today";
+        [Fact]
+        public void LintContent_ShouldRejectMalformedJsonConfiguration()
+        {
+            var service = new MarkdownLintCliService();
+            var directory = CreateTempDirectory();
+            var configPath = Path.Combine(directory, "invalid.markdownlint.json");
+            File.WriteAllText(configPath, "{ invalid json }");
+            var markdown = "# Test";
 
-            // Act
-            var result = await service.LintContentAsync(badContent);
+            try
+            {
+                var result = service.LintContent(markdown, configPath);
 
-            // Assert - both MD034 and MD047 should be fixed
-            result.Should().EndWith("\n", "because MD047 adds trailing newline");
-            result.Should().Contain("<https://example.com>", "because MD034 wraps bare URLs");
+                result.Success.Should().BeFalse();
+                result.Content.Should().Be(markdown);
+                result.ErrorMessage.Should().Contain("Invalid Markdown lint configuration");
+            }
+            finally
+            {
+                Directory.Delete(directory, true);
+            }
+        }
+
+        [Fact]
+        public void LintContent_ShouldKeepFixesAndWarn_WhenIssuesRemain()
+        {
+            var service = new MarkdownLintCliService();
+            var directory = CreateTempDirectory();
+            var configPath = Path.Combine(directory, "remaining.markdownlint.json");
+            File.WriteAllText(configPath, "{\"default\":false,\"MD013\":true,\"MD047\":true}");
+            var markdown = "# Test\n\nThis line is intentionally much longer than eighty characters so MD013 remains after MD047 is automatically fixed by markdownlint-cli2.";
+
+            try
+            {
+                var result = service.LintContent(markdown, configPath);
+
+                result.Success.Should().BeTrue();
+                result.Content.Should().EndWith("\n");
+                result.WarningMessage.Should().Contain("MD013");
+            }
+            finally
+            {
+                Directory.Delete(directory, true);
+            }
+        }
+
+        [Fact]
+        public async Task LintFileAsync_ShouldHandleSpecialPathsAndPreserveUnicodeAndCrLf()
+        {
+            var service = new MarkdownLintCliService();
+            var directory = CreateTempDirectory("markdownlint path with spaces ");
+            var filePath = Path.Combine(directory, "file [1] # test.md");
+            var markdown = "# Tést 🚀\r\n\r\nVisit https://example.com";
+            File.WriteAllText(filePath, markdown, new UTF8Encoding(false));
+
+            try
+            {
+                var result = await service.LintFileAsync(filePath);
+                var content = File.ReadAllText(filePath);
+
+                result.Success.Should().BeTrue();
+                content.Should().Contain("# Tést 🚀");
+                content.Should().Contain("<https://example.com>");
+                content.Should().EndWith("\r\n");
+            }
+            finally
+            {
+                Directory.Delete(directory, true);
+            }
+        }
+
+        private static string GetResourcesPath()
+        {
+            return Path.Combine(AppContext.BaseDirectory, "resources");
+        }
+
+        private static string CreateTempDirectory(string prefix = "markdownlint_")
+        {
+            var path = Path.Combine(Path.GetTempPath(), prefix + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(path);
+            return path;
         }
     }
 }

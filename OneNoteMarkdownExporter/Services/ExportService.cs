@@ -47,7 +47,7 @@ namespace OneNoteMarkdownExporter.Services
     {
         bool IsAvailable { get; }
         string UnavailableReason { get; }
-        string LintContent(string markdown);
+        LintResult LintContent(string markdown, string? configPath = null);
     }
 
     /// <summary>
@@ -90,12 +90,12 @@ namespace OneNoteMarkdownExporter.Services
         }
 
         /// <summary>
-        /// Checks if markdownlint-cli is available.
+        /// Checks if markdownlint-cli2 is available.
         /// </summary>
         public bool IsMarkdownCliLinterAvailable => _cliLinter.IsAvailable;
 
         /// <summary>
-        /// Gets the reason why markdownlint-cli is unavailable.
+        /// Gets the reason why markdownlint-cli2 is unavailable.
         /// </summary>
         public string MarkdownCliLinterUnavailableReason => _cliLinter.UnavailableReason;
 
@@ -176,11 +176,15 @@ namespace OneNoteMarkdownExporter.Services
             var relativeAssetsPath = AssetPathResolver.GetRelativeAssetsPath(outputPath, assetsRoot);
             var markdown = _xmlConverter.Convert(pageXml, assetsRoot, relativeAssetsPath, binaryFetcher, pagePrefix);
 
-            if (options.ApplyLinting)
+            if (options.ApplyLinting && _cliLinter.IsAvailable)
             {
                 try
                 {
-                    markdown = _cliLinter.LintContent(markdown);
+                    var lintResult = _cliLinter.LintContent(markdown, options.LintConfigPath);
+                    if (lintResult.Success)
+                    {
+                        markdown = lintResult.Content;
+                    }
                 }
                 catch
                 {
@@ -359,6 +363,13 @@ namespace OneNoteMarkdownExporter.Services
                 Report(progress, ExportProgressKind.Message, "Dry run mode - listing items that would be exported:", result);
                 ListItems(selectedItems, progress, result, "");
                 return result;
+            }
+
+            if (options.ApplyLinting && !_cliLinter.IsAvailable)
+            {
+                var warning = $"Markdown linting is unavailable: {_cliLinter.UnavailableReason} Export will continue without linting.";
+                result.Warnings.Add(warning);
+                Report(progress, ExportProgressKind.Warning, warning, result);
             }
 
             var planner = new ExportPathPlanner(options.OutputPath, options);
@@ -572,17 +583,34 @@ namespace OneNoteMarkdownExporter.Services
                     markdown = _yamlFrontMatterService.AddFrontMatter(markdown, page);
                 }
 
-                // Apply linting if enabled (using markdownlint-cli)
-                if (options.ApplyLinting)
+                // Apply linting if enabled and the bundled runtime is available.
+                if (options.ApplyLinting && _cliLinter.IsAvailable)
                 {
                     try
                     {
-                        markdown = _cliLinter.LintContent(markdown);
+                        var lintResult = _cliLinter.LintContent(markdown, options.LintConfigPath);
+                        if (lintResult.Success)
+                        {
+                            markdown = lintResult.Content;
+                            if (!string.IsNullOrWhiteSpace(lintResult.WarningMessage))
+                            {
+                                var warning = $"Warning: Markdown linting completed with unresolved issues for '{page.Name}': {lintResult.WarningMessage}";
+                                result.Warnings.Add(warning);
+                                Report(progress, ExportProgressKind.Warning, warning, result, page, finalMdPath);
+                            }
+                        }
+                        else
+                        {
+                            var warning = $"Warning: Markdown linting failed for '{page.Name}': {lintResult.ErrorMessage}";
+                            result.Warnings.Add(warning);
+                            Report(progress, ExportProgressKind.Warning, warning, result, page, finalMdPath);
+                        }
                     }
                     catch (Exception lintEx)
                     {
-                        Report(progress, ExportProgressKind.Warning, $"  Warning: Linting failed for '{page.Name}': {lintEx.Message}", result, page, finalMdPath);
-                        // Continue with unlinted markdown
+                        var warning = $"Warning: Markdown linting failed for '{page.Name}': {lintEx.Message}";
+                        result.Warnings.Add(warning);
+                        Report(progress, ExportProgressKind.Warning, warning, result, page, finalMdPath);
                     }
                 }
 
