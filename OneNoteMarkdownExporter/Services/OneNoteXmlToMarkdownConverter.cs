@@ -30,6 +30,7 @@ namespace OneNoteMarkdownExporter.Services
         private string _relativeAssetsPath = "";
         private string _pagePrefix = "";
         private int _imageCounter = 0;
+        private int _attachmentCounter = 0;
         private string _literalAnglePlaceholderPrefix = "";
         private int _literalAnglePlaceholderCounter = 0;
         private readonly Dictionary<string, string> _literalAnglePlaceholders = new();
@@ -53,6 +54,7 @@ namespace OneNoteMarkdownExporter.Services
             _relativeAssetsPath = relativeAssetsPath;
             _pagePrefix = SanitizePrefix(pagePrefix);
             _imageCounter = 0;
+            _attachmentCounter = 0;
             _literalAnglePlaceholderPrefix = $"ONENOTELITERAL{Guid.NewGuid():N}";
             _literalAnglePlaceholderCounter = 0;
             _literalAnglePlaceholders.Clear();
@@ -86,6 +88,12 @@ namespace OneNoteMarkdownExporter.Services
             foreach (var image in doc.Root.Elements(_ns + "Image"))
             {
                 ProcessImage(image, htmlBuilder);
+            }
+
+            // Process any inserted files directly on the page (outside outlines)
+            foreach (var insertedFile in doc.Root.Elements(_ns + "InsertedFile"))
+            {
+                ProcessInsertedFile(insertedFile, htmlBuilder);
             }
 
             htmlBuilder.AppendLine("</body></html>");
@@ -215,6 +223,10 @@ namespace OneNoteMarkdownExporter.Services
             // Check for images
             if (oe.Elements(_ns + "Image").Any())
                 return true;
+
+            // Check for inserted files / attachments
+            if (oe.Elements(_ns + "InsertedFile").Any())
+                return true;
             
             // Check for tables
             if (oe.Elements(_ns + "Table").Any())
@@ -259,6 +271,12 @@ namespace OneNoteMarkdownExporter.Services
             foreach (var image in oe.Elements(_ns + "Image"))
             {
                 content.Append(ProcessImageToHtml(image));
+            }
+
+            // Process inserted files / attachments
+            foreach (var insertedFile in oe.Elements(_ns + "InsertedFile"))
+            {
+                content.Append(ProcessInsertedFileToHtml(insertedFile));
             }
 
             var textContent = content.ToString();
@@ -543,6 +561,122 @@ namespace OneNoteMarkdownExporter.Services
             {
                 return $"<p><em>[Image export failed: {System.Net.WebUtility.HtmlEncode(ex.Message)}]</em></p>";
             }
+        }
+
+
+        private void ProcessInsertedFile(XElement insertedFile, StringBuilder html)
+        {
+            html.Append(ProcessInsertedFileToHtml(insertedFile));
+        }
+
+        /// <summary>
+        /// Exports an original file attached to a OneNote page (InsertedFile) into the
+        /// configured assets folder and adds a normal relative Markdown-compatible link.
+        /// OneNote exposes the locally cached original via pathCache; pathSource is used
+        /// as a fallback when the cache path is unavailable.
+        /// </summary>
+        private string ProcessInsertedFileToHtml(XElement insertedFile)
+        {
+            try
+            {
+                var preferredName = insertedFile.Attribute("preferredName")?.Value;
+                var pathCache = insertedFile.Attribute("pathCache")?.Value;
+                var pathSource = insertedFile.Attribute("pathSource")?.Value;
+
+                var sourcePath = GetFirstExistingFile(pathCache, pathSource);
+                var displayName = !string.IsNullOrWhiteSpace(preferredName)
+                    ? Path.GetFileName(preferredName)
+                    : !string.IsNullOrWhiteSpace(sourcePath)
+                        ? Path.GetFileName(sourcePath)
+                        : "attachment";
+
+                if (string.IsNullOrWhiteSpace(sourcePath))
+                {
+                    var details = $"preferredName={preferredName ?? "none"}, pathCache={pathCache ?? "none"}, pathSource={pathSource ?? "none"}";
+                    return $"<p><strong>[ATTACHMENT EXPORT FAILED: original file not available locally. {System.Net.WebUtility.HtmlEncode(details)}]</strong></p>";
+                }
+
+                if (!Directory.Exists(_assetsFolder))
+                {
+                    Directory.CreateDirectory(_assetsFolder);
+                }
+
+                _attachmentCounter++;
+                var fileName = GetSafeAttachmentFileName(displayName, _attachmentCounter);
+                var filePath = Path.Combine(_assetsFolder, fileName);
+
+                File.Copy(sourcePath, filePath, true);
+
+                var relativePath = $"{_relativeAssetsPath}/{fileName}".Replace("\\", "/");
+                var encodedHref = System.Net.WebUtility.HtmlEncode(relativePath);
+                var encodedName = System.Net.WebUtility.HtmlEncode(displayName);
+                return $"<p><a href=\"{encodedHref}\">{encodedName}</a></p>";
+            }
+            catch (Exception ex)
+            {
+                return $"<p><strong>[ATTACHMENT EXPORT FAILED: {System.Net.WebUtility.HtmlEncode(ex.Message)}]</strong></p>";
+            }
+        }
+
+        private static string? GetFirstExistingFile(params string?[] candidatePaths)
+        {
+            foreach (var candidatePath in candidatePaths)
+            {
+                if (string.IsNullOrWhiteSpace(candidatePath))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var expandedPath = Environment.ExpandEnvironmentVariables(candidatePath.Trim().Trim('"'));
+                    if (File.Exists(expandedPath))
+                    {
+                        return expandedPath;
+                    }
+                }
+                catch
+                {
+                    // Ignore malformed/unavailable candidates and try the next one.
+                }
+            }
+
+            return null;
+        }
+
+        private string GetSafeAttachmentFileName(string originalName, int attachmentIndex)
+        {
+            var originalExtension = Path.GetExtension(originalName);
+            var originalStem = Path.GetFileNameWithoutExtension(originalName);
+
+            var safeExtension = string.IsNullOrWhiteSpace(originalExtension)
+                ? string.Empty
+                : ExportPathSanitizer.SanitizeComponent(originalExtension, string.Empty, originalExtension);
+
+            // Sanitize the descriptive part while keeping the original extension.
+            var safeStem = ExportPathSanitizer
+                .SanitizeComponent(originalStem, "attachment", originalName)
+                .Replace(' ', '_');
+
+            var pageStem = string.IsNullOrWhiteSpace(_pagePrefix)
+                ? "page"
+                : _pagePrefix;
+
+            var baseStem = $"{pageStem}_attachment_{attachmentIndex:D4}_{safeStem}";
+
+            // Keep the complete path within the normal Win32 path budget used by the exporter.
+            var fullAssetsPath = Path.GetFullPath(_assetsFolder);
+            var availableFileNameLength = ExportPathSanitizer.MaxWin32PathLength - fullAssetsPath.Length - 1;
+            var extensionLength = safeExtension.Length;
+            var maxStemLength = Math.Max(1, availableFileNameLength - extensionLength);
+
+            if (baseStem.Length > maxStemLength)
+            {
+                baseStem = baseStem[..maxStemLength].TrimEnd(' ', '.');
+            }
+
+            var fileName = $"{baseStem}{safeExtension}";
+            return ExportPathSanitizer.SanitizeComponent(fileName, $"attachment_{attachmentIndex:D4}", originalName);
         }
 
         private string ProcessTable(XElement table)
@@ -871,4 +1005,3 @@ namespace OneNoteMarkdownExporter.Services
             return $"[{text}]({href})";
         }
     }
-}
