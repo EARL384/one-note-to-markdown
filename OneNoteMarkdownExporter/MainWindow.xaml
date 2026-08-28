@@ -1,4 +1,4 @@
-﻿<Window x:Class="OneNoteMarkdownExporter.MainWindow"
+<Window x:Class="OneNoteMarkdownExporter.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
@@ -81,32 +81,26 @@
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
 
                             <StackPanel Grid.Row="0" Grid.Column="0" Margin="0,0,16,8">
-                                <CheckBox x:Name="ExpandCollapsedBox" Content="Try to expand collapsed paragraphs" IsChecked="True" FontWeight="Normal" Margin="0,0,0,2"/>
-                                <TextBlock Text="Works only for writable notebooks." TextWrapping="Wrap" Foreground="#666666" FontSize="11" Margin="22,0,0,0"/>
-                            </StackPanel>
-
-                            <StackPanel Grid.Row="0" Grid.Column="1" Margin="0,0,0,8">
                                 <CheckBox x:Name="OverwriteExistingBox" Content="Overwrite existing files" IsChecked="True" FontWeight="Normal" Margin="0,0,0,2"/>
                                 <TextBlock Text="Keeps repeated exports in sync." TextWrapping="Wrap" Foreground="#666666" FontSize="11" Margin="22,0,0,0"/>
                             </StackPanel>
 
-                            <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,0,16,8">
+                            <StackPanel Grid.Row="0" Grid.Column="1" Margin="0,0,0,8">
+                                <CheckBox x:Name="PreserveDatesBox" Content="Preserve OneNote dates as file timestamps" IsChecked="True" FontWeight="Normal" Margin="0,0,0,2"/>
+                                <TextBlock Text="Sets .md Created and Modified dates from OneNote. Does not change Markdown content." TextWrapping="Wrap" Foreground="#666666" FontSize="11" Margin="22,0,0,0"/>
+                            </StackPanel>
+
+                            <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,0,16,0">
                                 <CheckBox x:Name="LintMarkdownBox" Content="Apply Markdown linting" IsChecked="True" FontWeight="Normal" Margin="0,0,0,2"/>
                                 <TextBlock Text="Runs bundled markdownlint-cli2 after conversion." TextWrapping="Wrap" Foreground="#666666" FontSize="11" Margin="22,0,0,4"/>
                                 <Button x:Name="ConfigureLintingButton" Content="Edit .markdownlint.json..." Click="ConfigureLinting_Click"
                                         HorizontalAlignment="Left" Margin="22,0,0,0" Padding="8,2" FontSize="11"/>
                             </StackPanel>
 
-                            <StackPanel Grid.Row="1" Grid.Column="1" Margin="0,0,0,8">
-                                <CheckBox x:Name="PreserveDatesBox" Content="Preserve OneNote dates as file timestamps" IsChecked="True" FontWeight="Normal" Margin="0,0,0,2"/>
-                                <TextBlock Text="Sets .md Created and Modified dates from OneNote. Does not change Markdown content." TextWrapping="Wrap" Foreground="#666666" FontSize="11" Margin="22,0,0,0"/>
-                            </StackPanel>
-
-                            <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2">
+                            <StackPanel Grid.Row="1" Grid.Column="1">
                                 <CheckBox x:Name="YamlMetadataBox" Content="Add YAML front matter metadata" IsChecked="False" FontWeight="Normal" Margin="0,0,0,2"/>
                                 <TextBlock Text="Adds created and updated dates to the top of each Markdown file." TextWrapping="Wrap" Foreground="#666666" FontSize="11" Margin="22,0,0,0"/>
                             </StackPanel>
@@ -146,3 +140,4 @@
         </Grid>
     </Grid>
 </Window>
+﻿
