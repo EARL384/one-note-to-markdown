@@ -68,6 +68,16 @@ namespace OneNoteMarkdownExporter.Services
             return Path.Combine(folderPath, safeFileName);
         }
 
+        /// <summary>
+        /// Returns a short, deterministic hash for a OneNote-derived stable identifier.
+        /// Useful when otherwise identical page names need a repeatable disambiguation suffix.
+        /// </summary>
+        public static string GetStableHashSuffix(string? stableInput)
+        {
+            var value = string.IsNullOrWhiteSpace(stableInput) ? DefaultFallbackName : stableInput;
+            return GetStableHash(value);
+        }
+
         public static string GetSafeAssetFileName(string assetsFolder, string? pagePrefix, int imageIndex, string extension)
         {
             var normalizedExtension = NormalizeExtension(extension);
