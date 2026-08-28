@@ -156,6 +156,54 @@ namespace OneNoteMarkdownExporter.Services
             public Dictionary<string, string> Entries { get; set; } = new();
         }
 
+        // Writes every export progress message to a per-run log file while forwarding
+        // the same progress update to the existing GUI/CLI progress reporter.
+        // The log is diagnostic only and does not affect export behavior.
+        private sealed class ExportRunFileProgress : IProgress<ExportProgressUpdate>, IDisposable
+        {
+            private readonly IProgress<ExportProgressUpdate>? _innerProgress;
+            private readonly StreamWriter _writer;
+            private readonly object _sync = new();
+
+            public ExportRunFileProgress(
+                IProgress<ExportProgressUpdate>? innerProgress,
+                string logFilePath)
+            {
+                _innerProgress = innerProgress;
+                LogFilePath = logFilePath;
+                _writer = new StreamWriter(logFilePath, append: false)
+                {
+                    AutoFlush = true
+                };
+            }
+
+            public string LogFilePath { get; }
+
+            public void Report(ExportProgressUpdate value)
+            {
+                lock (_sync)
+                {
+                    _writer.WriteLine($"{DateTime.Now:HH:mm:ss}: {value.Message}");
+
+                    if (value.Kind == ExportProgressKind.PageFailed
+                        && !string.IsNullOrWhiteSpace(value.FailureDetails))
+                    {
+                        _writer.WriteLine(value.FailureDetails);
+                    }
+                }
+
+                _innerProgress?.Report(value);
+            }
+
+            public void Dispose()
+            {
+                lock (_sync)
+                {
+                    _writer.Dispose();
+                }
+            }
+        }
+
         public ExportService()
             : this(new OneNoteService(), new OneNoteXmlToMarkdownConverter(), new MarkdownLintCliService(), new FileTimestampService(), new YamlFrontMatterService())
         {
@@ -206,29 +254,38 @@ namespace OneNoteMarkdownExporter.Services
             CancellationToken cancellationToken = default)
         {
             var result = new ExportResult();
+            ExportRunFileProgress? fileProgress = null;
+            var runProgress = progress;
 
             try
             {
                 PrepareOptions(options);
+                fileProgress = TryCreateExportRunFileProgress(options, progress);
+                runProgress = fileProgress ?? progress;
+                ReportExportLogStart(runProgress, fileProgress, options);
 
                 // Get notebook hierarchy
-                Report(progress, ExportProgressKind.Message, "Loading OneNote hierarchy...");
+                Report(runProgress, ExportProgressKind.Message, "Loading OneNote hierarchy...");
                 var hierarchyStopwatch = Stopwatch.StartNew();
                 var notebooks = _oneNoteService.GetNotebookHierarchy();
                 hierarchyStopwatch.Stop();
                 Report(
-                    progress,
+                    runProgress,
                     ExportProgressKind.Message,
                     $"PERF: Full OneNote hierarchy loaded in {FormatPerformanceDuration(hierarchyStopwatch.Elapsed)}.");
 
                 // Apply selection criteria
                 var selectedItems = ApplySelectionCriteria(notebooks, options);
-                return await ExportItemsAsync(selectedItems, notebooks, options, progress, cancellationToken);
+                return await ExportItemsAsync(selectedItems, notebooks, options, runProgress, cancellationToken);
             }
             catch (Exception ex)
             {
                 result.Error = ex.Message;
-                Report(progress, ExportProgressKind.Message, $"Export failed: {ex.Message}");
+                Report(runProgress, ExportProgressKind.Message, $"Export failed: {ex.Message}");
+            }
+            finally
+            {
+                fileProgress?.Dispose();
             }
 
             return result;
@@ -241,10 +298,15 @@ namespace OneNoteMarkdownExporter.Services
             CancellationToken cancellationToken = default)
         {
             var result = new ExportResult();
+            ExportRunFileProgress? fileProgress = null;
+            var runProgress = progress;
 
             try
             {
                 PrepareOptions(options);
+                fileProgress = TryCreateExportRunFileProgress(options, progress);
+                runProgress = fileProgress ?? progress;
+                ReportExportLogStart(runProgress, fileProgress, options);
 
                 // Build link/path planning from the full currently opened OneNote hierarchy,
                 // not only from the selected subset. This allows links to other notebooks
@@ -253,19 +315,60 @@ namespace OneNoteMarkdownExporter.Services
                 var fullHierarchy = _oneNoteService.GetNotebookHierarchy();
                 hierarchyStopwatch.Stop();
                 Report(
-                    progress,
+                    runProgress,
                     ExportProgressKind.Message,
                     $"PERF: Full OneNote hierarchy loaded in {FormatPerformanceDuration(hierarchyStopwatch.Elapsed)}.");
 
-                return await ExportItemsAsync(items, fullHierarchy, options, progress, cancellationToken);
+                return await ExportItemsAsync(items, fullHierarchy, options, runProgress, cancellationToken);
             }
             catch (Exception ex)
             {
                 result.Error = ex.Message;
-                Report(progress, ExportProgressKind.Message, $"Export failed: {ex.Message}");
+                Report(runProgress, ExportProgressKind.Message, $"Export failed: {ex.Message}");
+            }
+            finally
+            {
+                fileProgress?.Dispose();
             }
 
             return result;
+        }
+
+        private static ExportRunFileProgress? TryCreateExportRunFileProgress(
+            ExportOptions options,
+            IProgress<ExportProgressUpdate>? progress)
+        {
+            try
+            {
+                var logsDirectory = Path.Combine(options.OutputPath, "_export_logs");
+                Directory.CreateDirectory(logsDirectory);
+
+                var fileName = $"OneNoteMarkdownExport_{DateTime.Now:yyyy-MM-dd_HH-mm-ss-fff}.log";
+                var logFilePath = Path.Combine(logsDirectory, fileName);
+                return new ExportRunFileProgress(progress, logFilePath);
+            }
+            catch (Exception ex)
+            {
+                Report(
+                    progress,
+                    ExportProgressKind.Warning,
+                    $"Warning: Could not create export log file. Export will continue without a file log: {ex.Message}");
+                return null;
+            }
+        }
+
+        private static void ReportExportLogStart(
+            IProgress<ExportProgressUpdate>? progress,
+            ExportRunFileProgress? fileProgress,
+            ExportOptions options)
+        {
+            if (fileProgress == null)
+            {
+                return;
+            }
+
+            Report(progress, ExportProgressKind.Message, $"Export log file: {fileProgress.LogFilePath}");
+            Report(progress, ExportProgressKind.Message, $"Output directory: {options.OutputPath}");
         }
 
         /// <summary>
