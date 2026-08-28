@@ -9,7 +9,7 @@ using System.Globalization;
 
 namespace OneNoteMarkdownExporter.Services
 {
-    public class OneNoteService : IOneNoteExportSource
+    public class OneNoteService : IOneNoteExportSource, IOneNoteHyperlinkSource
     {
         private Microsoft.Office.Interop.OneNote.Application _oneNoteApp;
         private const string OneNoteNamespace = "http://schemas.microsoft.com/office/onenote/2013/onenote";
@@ -211,6 +211,25 @@ namespace OneNoteMarkdownExporter.Services
             string xml;
             _oneNoteApp.GetPageContent(pageId, out xml, PageInfo.piAll);
             return xml;
+        }
+
+        /// <summary>
+        /// Converts OneNote's runtime hierarchy ID for a page into the portable
+        /// OneNote hyperlink representation. The hyperlink contains the stable
+        /// page-id used by copied OneNote links.
+        /// </summary>
+        public string? GetHyperlinkToObject(string hierarchyId)
+        {
+            try
+            {
+                string hyperlink;
+                _oneNoteApp.GetHyperlinkToObject(hierarchyId, string.Empty, out hyperlink);
+                return hyperlink;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
         }
 
         /// <summary>
