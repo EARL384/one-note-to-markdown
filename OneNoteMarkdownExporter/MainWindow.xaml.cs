@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Text.Json;
 using System.Threading;
 using System.Windows;
 using System.Windows.Forms;
@@ -10,12 +11,33 @@ using OneNoteMarkdownExporter.Services;
 
 namespace OneNoteMarkdownExporter
 {
+    internal sealed class UiSettings
+    {
+        public int Version { get; set; } = 1;
+        public string? OutputPath { get; set; }
+        public string? AssetsFolderPath { get; set; }
+        public int? AssetOrganizationIndex { get; set; }
+        public bool? ExpandCollapsed { get; set; }
+        public bool? OverwriteExisting { get; set; }
+        public bool? ApplyMarkdownLinting { get; set; }
+        public bool? PreserveDates { get; set; }
+        public bool? AddYamlMetadata { get; set; }
+    }
+
     public partial class MainWindow : Window
     {
         private readonly ExportService _exportService;
         private CancellationTokenSource? _cts;
         private const string NoFailuresMessage = "No failures.";
+        private const string SettingsFolderName = "OneNoteMarkdownExporter";
+        private const string SettingsFileName = "settings.json";
         private int _failureLogCount;
+
+        private static string SettingsFilePath =>
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                SettingsFolderName,
+                SettingsFileName);
 
         public MainWindow()
         {
@@ -26,7 +48,114 @@ namespace OneNoteMarkdownExporter
             OneNoteItem.SelectionChanged += OnSelectionChanged;
 
             SetDefaultOutputPath();
+            LoadUiSettings();
             UpdateAssetOrganizationUi();
+
+            Closing += (_, _) => SaveUiSettings();
+        }
+
+        private void LoadUiSettings()
+        {
+            try
+            {
+                if (!File.Exists(SettingsFilePath))
+                {
+                    return;
+                }
+
+                var json = File.ReadAllText(SettingsFilePath);
+                var settings = JsonSerializer.Deserialize<UiSettings>(json);
+                if (settings == null)
+                {
+                    return;
+                }
+
+                if (!string.IsNullOrWhiteSpace(settings.OutputPath))
+                {
+                    OutputPathBox.Text = settings.OutputPath;
+                }
+
+                if (!string.IsNullOrWhiteSpace(settings.AssetsFolderPath))
+                {
+                    AssetsPathBox.Text = settings.AssetsFolderPath;
+                }
+                else if (!string.IsNullOrWhiteSpace(OutputPathBox.Text))
+                {
+                    AssetsPathBox.Text = AssetPathResolver.GetDefaultAssetsFolderPath(OutputPathBox.Text);
+                }
+
+                if (settings.AssetOrganizationIndex.HasValue
+                    && settings.AssetOrganizationIndex.Value >= 0
+                    && settings.AssetOrganizationIndex.Value <= 3)
+                {
+                    AssetOrganizationBox.SelectedIndex = settings.AssetOrganizationIndex.Value;
+                }
+
+                if (settings.ExpandCollapsed.HasValue)
+                {
+                    ExpandCollapsedBox.IsChecked = settings.ExpandCollapsed.Value;
+                }
+
+                if (settings.OverwriteExisting.HasValue)
+                {
+                    OverwriteExistingBox.IsChecked = settings.OverwriteExisting.Value;
+                }
+
+                if (settings.ApplyMarkdownLinting.HasValue)
+                {
+                    LintMarkdownBox.IsChecked = settings.ApplyMarkdownLinting.Value;
+                }
+
+                if (settings.PreserveDates.HasValue)
+                {
+                    PreserveDatesBox.IsChecked = settings.PreserveDates.Value;
+                }
+
+                if (settings.AddYamlMetadata.HasValue)
+                {
+                    YamlMetadataBox.IsChecked = settings.AddYamlMetadata.Value;
+                }
+
+                Log($"Loaded UI settings from: {SettingsFilePath}");
+            }
+            catch (Exception ex)
+            {
+                Log($"Could not load UI settings; using defaults: {ex.Message}");
+            }
+        }
+
+        private void SaveUiSettings()
+        {
+            try
+            {
+                var settingsDirectory = Path.GetDirectoryName(SettingsFilePath);
+                if (!string.IsNullOrWhiteSpace(settingsDirectory))
+                {
+                    Directory.CreateDirectory(settingsDirectory);
+                }
+
+                var settings = new UiSettings
+                {
+                    OutputPath = OutputPathBox.Text,
+                    AssetsFolderPath = AssetsPathBox.Text,
+                    AssetOrganizationIndex = AssetOrganizationBox.SelectedIndex,
+                    ExpandCollapsed = ExpandCollapsedBox.IsChecked == true,
+                    OverwriteExisting = OverwriteExistingBox.IsChecked == true,
+                    ApplyMarkdownLinting = LintMarkdownBox.IsChecked == true,
+                    PreserveDates = PreserveDatesBox.IsChecked == true,
+                    AddYamlMetadata = YamlMetadataBox.IsChecked == true
+                };
+
+                var json = JsonSerializer.Serialize(
+                    settings,
+                    new JsonSerializerOptions { WriteIndented = true });
+
+                File.WriteAllText(SettingsFilePath, json);
+            }
+            catch (Exception ex)
+            {
+                Log($"Could not save UI settings: {ex.Message}");
+            }
         }
 
         private void SetDefaultOutputPath()
@@ -146,6 +275,7 @@ namespace OneNoteMarkdownExporter
                     }
 
                     UpdateAssetOrganizationUi();
+                    SaveUiSettings();
                 }
             }
         }
@@ -203,6 +333,7 @@ namespace OneNoteMarkdownExporter
                 if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
                 {
                     AssetsPathBox.Text = dialog.SelectedPath;
+                    SaveUiSettings();
                 }
             }
         }
@@ -259,6 +390,7 @@ namespace OneNoteMarkdownExporter
             try
             {
                 options.Validate();
+                SaveUiSettings();
             }
             catch (Exception ex)
             {
