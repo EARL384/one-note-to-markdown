@@ -74,6 +74,13 @@ namespace OneNoteMarkdownExporter.Services
         private readonly IFileTimestampService _timestampService;
         private readonly IYamlFrontMatterService _yamlFrontMatterService;
 
+        // Session-only cache for the expensive OneNote COM conversion from a
+        // runtime hierarchy ID to the portable page-id used in onenote: links.
+        // The cache lives only as long as this ExportService instance (normally
+        // one exporter program session) and never writes anything back to OneNote.
+        private readonly Dictionary<string, string> _hyperlinkPageIdSessionCache =
+            new(StringComparer.OrdinalIgnoreCase);
+
         private static readonly Regex OneNoteGuidRegex = new(
             @"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}",
             RegexOptions.Compiled);
@@ -116,8 +123,11 @@ namespace OneNoteMarkdownExporter.Services
         private sealed class LinkIndexPerformanceStats
         {
             public int PagesIndexed { get; set; }
+            public int HyperlinkCacheHits { get; set; }
+            public int HyperlinkCacheMisses { get; set; }
             public int HyperlinkCalls { get; set; }
             public int HyperlinksWithoutPageId { get; set; }
+            public int SessionCacheEntriesAfterBuild { get; set; }
             public TimeSpan HyperlinkTotalElapsed { get; set; }
             public TimeSpan SlowestHyperlinkElapsed { get; set; }
         }
@@ -461,6 +471,7 @@ namespace OneNoteMarkdownExporter.Services
             var pagePathIndexes = BuildPagePathIndexes(hierarchyForPlanning, pathPlanner, indexPerformanceStats);
             indexStopwatch.Stop();
 
+            indexPerformanceStats.SessionCacheEntriesAfterBuild = _hyperlinkPageIdSessionCache.Count;
             ReportLinkIndexPerformance(progress, result, indexStopwatch.Elapsed, indexPerformanceStats);
 
             var centralizedAssetsRoot = options.AssetOrganizationMode == AssetOrganizationMode.Centralized
@@ -568,27 +579,53 @@ namespace OneNoteMarkdownExporter.Services
 
                 // Build a separate portable hyperlink page-id -> path index. OneNote itself
                 // performs the conversion from the runtime hierarchy ID to the hyperlink ID.
+                //
+                // GetHyperlinkToObject is a comparatively expensive COM round-trip. During
+                // one exporter program session we therefore reuse a successful conversion for
+                // the same complete hierarchy/runtime ID. Only this ID conversion is cached;
+                // the Markdown target path is still recalculated from the current hierarchy on
+                // every export, preserving the existing rename/collision/path behavior.
                 if (_oneNoteService is IOneNoteHyperlinkSource hyperlinkSource)
                 {
-                    performanceStats.HyperlinkCalls++;
-                    var hyperlinkStopwatch = Stopwatch.StartNew();
-                    string? hyperlink;
+                    var cacheKey = NormalizeHierarchyId(item.Id);
+                    string hyperlinkPageId;
 
-                    try
+                    if (!string.IsNullOrWhiteSpace(cacheKey) &&
+                        _hyperlinkPageIdSessionCache.TryGetValue(cacheKey, out var cachedHyperlinkPageId))
                     {
-                        hyperlink = hyperlinkSource.GetHyperlinkToObject(item.Id);
+                        performanceStats.HyperlinkCacheHits++;
+                        hyperlinkPageId = cachedHyperlinkPageId;
                     }
-                    finally
+                    else
                     {
-                        hyperlinkStopwatch.Stop();
-                        performanceStats.HyperlinkTotalElapsed += hyperlinkStopwatch.Elapsed;
-                        if (hyperlinkStopwatch.Elapsed > performanceStats.SlowestHyperlinkElapsed)
+                        performanceStats.HyperlinkCacheMisses++;
+                        performanceStats.HyperlinkCalls++;
+
+                        var hyperlinkStopwatch = Stopwatch.StartNew();
+                        string? hyperlink;
+
+                        try
                         {
-                            performanceStats.SlowestHyperlinkElapsed = hyperlinkStopwatch.Elapsed;
+                            hyperlink = hyperlinkSource.GetHyperlinkToObject(item.Id);
+                        }
+                        finally
+                        {
+                            hyperlinkStopwatch.Stop();
+                            performanceStats.HyperlinkTotalElapsed += hyperlinkStopwatch.Elapsed;
+                            if (hyperlinkStopwatch.Elapsed > performanceStats.SlowestHyperlinkElapsed)
+                            {
+                                performanceStats.SlowestHyperlinkElapsed = hyperlinkStopwatch.Elapsed;
+                            }
+                        }
+
+                        hyperlinkPageId = ExtractHyperlinkPageId(hyperlink);
+                        if (!string.IsNullOrWhiteSpace(hyperlinkPageId) &&
+                            !string.IsNullOrWhiteSpace(cacheKey))
+                        {
+                            _hyperlinkPageIdSessionCache[cacheKey] = hyperlinkPageId;
                         }
                     }
 
-                    var hyperlinkPageId = ExtractHyperlinkPageId(hyperlink);
                     if (!string.IsNullOrWhiteSpace(hyperlinkPageId))
                     {
                         indexes.ByHyperlinkPageId[hyperlinkPageId] = planned;
@@ -631,6 +668,21 @@ namespace OneNoteMarkdownExporter.Services
                 progress,
                 ExportProgressKind.Message,
                 $"PERF: Pages indexed: {performanceStats.PagesIndexed}.",
+                result);
+            Report(
+                progress,
+                ExportProgressKind.Message,
+                $"PERF: Hyperlink cache hits: {performanceStats.HyperlinkCacheHits}.",
+                result);
+            Report(
+                progress,
+                ExportProgressKind.Message,
+                $"PERF: Hyperlink cache misses: {performanceStats.HyperlinkCacheMisses}.",
+                result);
+            Report(
+                progress,
+                ExportProgressKind.Message,
+                $"PERF: Session hyperlink cache entries: {performanceStats.SessionCacheEntriesAfterBuild}.",
                 result);
             Report(
                 progress,
