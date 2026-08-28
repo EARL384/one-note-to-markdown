@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -110,6 +111,17 @@ namespace OneNoteMarkdownExporter.Services
                 new(StringComparer.OrdinalIgnoreCase);
         }
 
+        // PERFORMANCE DIAGNOSTICS ONLY.
+        // These counters do not change export behavior or OneNote content.
+        private sealed class LinkIndexPerformanceStats
+        {
+            public int PagesIndexed { get; set; }
+            public int HyperlinkCalls { get; set; }
+            public int HyperlinksWithoutPageId { get; set; }
+            public TimeSpan HyperlinkTotalElapsed { get; set; }
+            public TimeSpan SlowestHyperlinkElapsed { get; set; }
+        }
+
         public ExportService()
             : this(new OneNoteService(), new OneNoteXmlToMarkdownConverter(), new MarkdownLintCliService(), new FileTimestampService(), new YamlFrontMatterService())
         {
@@ -160,18 +172,23 @@ namespace OneNoteMarkdownExporter.Services
             CancellationToken cancellationToken = default)
         {
             var result = new ExportResult();
-            
+
             try
             {
                 PrepareOptions(options);
 
                 // Get notebook hierarchy
                 Report(progress, ExportProgressKind.Message, "Loading OneNote hierarchy...");
+                var hierarchyStopwatch = Stopwatch.StartNew();
                 var notebooks = _oneNoteService.GetNotebookHierarchy();
+                hierarchyStopwatch.Stop();
+                Report(
+                    progress,
+                    ExportProgressKind.Message,
+                    $"PERF: Full OneNote hierarchy loaded in {FormatPerformanceDuration(hierarchyStopwatch.Elapsed)}.");
 
                 // Apply selection criteria
                 var selectedItems = ApplySelectionCriteria(notebooks, options);
-
                 return await ExportItemsAsync(selectedItems, notebooks, options, progress, cancellationToken);
             }
             catch (Exception ex)
@@ -198,7 +215,14 @@ namespace OneNoteMarkdownExporter.Services
                 // Build link/path planning from the full currently opened OneNote hierarchy,
                 // not only from the selected subset. This allows links to other notebooks
                 // to be translated to their future Markdown locations.
+                var hierarchyStopwatch = Stopwatch.StartNew();
                 var fullHierarchy = _oneNoteService.GetNotebookHierarchy();
+                hierarchyStopwatch.Stop();
+                Report(
+                    progress,
+                    ExportProgressKind.Message,
+                    $"PERF: Full OneNote hierarchy loaded in {FormatPerformanceDuration(hierarchyStopwatch.Elapsed)}.");
+
                 return await ExportItemsAsync(items, fullHierarchy, options, progress, cancellationToken);
             }
             catch (Exception ex)
@@ -216,10 +240,10 @@ namespace OneNoteMarkdownExporter.Services
         public string ExportPageToString(string pageId, ExportOptions options)
         {
             var pageXml = _oneNoteService.GetPageContent(pageId);
-            
+
             // Create a binary content fetcher for images that aren't embedded
             BinaryContentFetcher binaryFetcher = (callbackId) => _oneNoteService.GetBinaryPageContent(pageId, callbackId);
-            
+
             // Use a shortened hash of the pageId as prefix to avoid collisions (pageId is a GUID-like string)
             var pagePrefix = pageId.Length > 8 ? pageId.Substring(0, 8) : pageId;
             var outputPath = string.IsNullOrWhiteSpace(options.OutputPath)
@@ -264,7 +288,7 @@ namespace OneNoteMarkdownExporter.Services
             {
                 foreach (var notebook in notebooks)
                 {
-                    if (options.NotebookNames.Any(n => 
+                    if (options.NotebookNames.Any(n =>
                         notebook.Name.Equals(n, StringComparison.OrdinalIgnoreCase)))
                     {
                         SelectAllRecursive(notebook);
@@ -330,7 +354,7 @@ namespace OneNoteMarkdownExporter.Services
 
             foreach (var part in parts)
             {
-                found = current.FirstOrDefault(i => 
+                found = current.FirstOrDefault(i =>
                     i.Name.Equals(part, StringComparison.OrdinalIgnoreCase));
                 if (found == null) return null;
                 current = found.Children;
@@ -347,6 +371,7 @@ namespace OneNoteMarkdownExporter.Services
                 var found = FindItemById(item.Children, id);
                 if (found != null) return found;
             }
+
             return null;
         }
 
@@ -401,7 +426,6 @@ namespace OneNoteMarkdownExporter.Services
             CancellationToken cancellationToken)
         {
             var result = new ExportResult();
-
             if (!selectedItems.Any())
             {
                 Report(progress, ExportProgressKind.Message, "No items match the selection criteria.");
@@ -432,7 +456,12 @@ namespace OneNoteMarkdownExporter.Services
             // This gives us stable collision-safe filenames and a global page-id -> Markdown path
             // index for rewriting OneNote links, including links across notebooks.
             var pathPlanner = new ExportPathPlanner(options.OutputPath, options);
-            var pagePathIndexes = BuildPagePathIndexes(hierarchyForPlanning, pathPlanner);
+            var indexPerformanceStats = new LinkIndexPerformanceStats();
+            var indexStopwatch = Stopwatch.StartNew();
+            var pagePathIndexes = BuildPagePathIndexes(hierarchyForPlanning, pathPlanner, indexPerformanceStats);
+            indexStopwatch.Stop();
+
+            ReportLinkIndexPerformance(progress, result, indexStopwatch.Elapsed, indexPerformanceStats);
 
             var centralizedAssetsRoot = options.AssetOrganizationMode == AssetOrganizationMode.Centralized
                 ? AssetPathResolver.ResolveAssetsFolderPath(options.OutputPath, options.AssetsFolderPath)
@@ -466,10 +495,11 @@ namespace OneNoteMarkdownExporter.Services
 
         private PagePathIndexes BuildPagePathIndexes(
             List<OneNoteItem> hierarchy,
-            ExportPathPlanner planner)
+            ExportPathPlanner planner,
+            LinkIndexPerformanceStats performanceStats)
         {
             var indexes = new PagePathIndexes();
-            IndexItemsForPaths(hierarchy, planner.OutputRoot, planner, indexes);
+            IndexItemsForPaths(hierarchy, planner.OutputRoot, planner, indexes, performanceStats);
             return indexes;
         }
 
@@ -477,7 +507,8 @@ namespace OneNoteMarkdownExporter.Services
             IReadOnlyList<OneNoteItem> items,
             string currentPath,
             ExportPathPlanner planner,
-            PagePathIndexes indexes)
+            PagePathIndexes indexes,
+            LinkIndexPerformanceStats performanceStats)
         {
             // Detect collisions based on the actual Windows-safe Markdown filename, not only
             // on the visible OneNote title. This also catches titles that sanitize to the same name.
@@ -500,11 +531,13 @@ namespace OneNoteMarkdownExporter.Services
                     var containerPath = planner.GetContainerFolderPath(currentPath, item);
                     if (item.Children.Count > 0)
                     {
-                        IndexItemsForPaths(item.Children, containerPath, planner, indexes);
+                        IndexItemsForPaths(item.Children, containerPath, planner, indexes, performanceStats);
                     }
 
                     continue;
                 }
+
+                performanceStats.PagesIndexed++;
 
                 var basePath = basePaths[item];
                 var hasCollision = collidingPaths.Contains(basePath);
@@ -537,19 +570,105 @@ namespace OneNoteMarkdownExporter.Services
                 // performs the conversion from the runtime hierarchy ID to the hyperlink ID.
                 if (_oneNoteService is IOneNoteHyperlinkSource hyperlinkSource)
                 {
-                    var hyperlink = hyperlinkSource.GetHyperlinkToObject(item.Id);
+                    performanceStats.HyperlinkCalls++;
+                    var hyperlinkStopwatch = Stopwatch.StartNew();
+                    string? hyperlink;
+
+                    try
+                    {
+                        hyperlink = hyperlinkSource.GetHyperlinkToObject(item.Id);
+                    }
+                    finally
+                    {
+                        hyperlinkStopwatch.Stop();
+                        performanceStats.HyperlinkTotalElapsed += hyperlinkStopwatch.Elapsed;
+                        if (hyperlinkStopwatch.Elapsed > performanceStats.SlowestHyperlinkElapsed)
+                        {
+                            performanceStats.SlowestHyperlinkElapsed = hyperlinkStopwatch.Elapsed;
+                        }
+                    }
+
                     var hyperlinkPageId = ExtractHyperlinkPageId(hyperlink);
                     if (!string.IsNullOrWhiteSpace(hyperlinkPageId))
                     {
                         indexes.ByHyperlinkPageId[hyperlinkPageId] = planned;
                     }
+                    else
+                    {
+                        performanceStats.HyperlinksWithoutPageId++;
+                    }
                 }
 
                 if (item.Children.Count > 0)
                 {
-                    IndexItemsForPaths(item.Children, childPageFolderPath, planner, indexes);
+                    IndexItemsForPaths(item.Children, childPageFolderPath, planner, indexes, performanceStats);
                 }
             }
+        }
+
+        private static void ReportLinkIndexPerformance(
+            IProgress<ExportProgressUpdate>? progress,
+            ExportResult result,
+            TimeSpan totalIndexElapsed,
+            LinkIndexPerformanceStats performanceStats)
+        {
+            var localIndexElapsed = totalIndexElapsed - performanceStats.HyperlinkTotalElapsed;
+            if (localIndexElapsed < TimeSpan.Zero)
+            {
+                localIndexElapsed = TimeSpan.Zero;
+            }
+
+            var averageHyperlinkElapsed = performanceStats.HyperlinkCalls > 0
+                ? TimeSpan.FromTicks(performanceStats.HyperlinkTotalElapsed.Ticks / performanceStats.HyperlinkCalls)
+                : TimeSpan.Zero;
+
+            Report(
+                progress,
+                ExportProgressKind.Message,
+                $"PERF: Global link index built in {FormatPerformanceDuration(totalIndexElapsed)}.",
+                result);
+            Report(
+                progress,
+                ExportProgressKind.Message,
+                $"PERF: Pages indexed: {performanceStats.PagesIndexed}.",
+                result);
+            Report(
+                progress,
+                ExportProgressKind.Message,
+                $"PERF: GetHyperlinkToObject calls: {performanceStats.HyperlinkCalls}.",
+                result);
+            Report(
+                progress,
+                ExportProgressKind.Message,
+                $"PERF: GetHyperlinkToObject total: {FormatPerformanceDuration(performanceStats.HyperlinkTotalElapsed)}.",
+                result);
+            Report(
+                progress,
+                ExportProgressKind.Message,
+                $"PERF: GetHyperlinkToObject average: {FormatPerformanceDuration(averageHyperlinkElapsed)}.",
+                result);
+            Report(
+                progress,
+                ExportProgressKind.Message,
+                $"PERF: GetHyperlinkToObject slowest: {FormatPerformanceDuration(performanceStats.SlowestHyperlinkElapsed)}.",
+                result);
+            Report(
+                progress,
+                ExportProgressKind.Message,
+                $"PERF: Hyperlinks without page-id: {performanceStats.HyperlinksWithoutPageId}.",
+                result);
+            Report(
+                progress,
+                ExportProgressKind.Message,
+                $"PERF: Remaining local index work (approx.): {FormatPerformanceDuration(localIndexElapsed)}.",
+                result);
+        }
+
+        private static string FormatPerformanceDuration(TimeSpan elapsed)
+        {
+            return elapsed.TotalSeconds >= 1
+                ? $"{elapsed.TotalSeconds:F3} s ({elapsed.TotalMilliseconds:F0} ms)"
+                : $"{elapsed.TotalMilliseconds:F1} ms";
         }
 
         private static PlannedPagePath? GetPlannedPagePath(
@@ -652,6 +771,7 @@ namespace OneNoteMarkdownExporter.Services
                         OneNoteItemType.Page => "[Page]",
                         _ => "[Unknown]"
                     };
+
                     Report(progress, ExportProgressKind.Message, $"{indent}{typeStr} {item.Name}", result);
                     ListItems(item.Children, progress, result, indent + "  ", isSelected);
                 }
@@ -680,7 +800,6 @@ namespace OneNoteMarkdownExporter.Services
             if (!isSelected && !hasSelectedDescendants) return;
 
             string myPath = currentPath;
-
             if (item.Type != OneNoteItemType.Page)
             {
                 // It's a container
@@ -706,7 +825,6 @@ namespace OneNoteMarkdownExporter.Services
                 foreach (var child in item.Children)
                 {
                     if (token.IsCancellationRequested) return;
-
                     ExportItem(child, myPath, centralizedAssetsRoot, childNotebookAssetsFolder, childSectionAssetsFolder, planner, pagePathIndexes, options, result, progress, token, isSelected);
                 }
             }
@@ -725,6 +843,7 @@ namespace OneNoteMarkdownExporter.Services
                 {
                     myPath = GetPlannedPagePath(item, pagePathIndexes)?.ChildPageFolderPath
                         ?? planner.GetChildPageFolderPath(currentPath, item);
+
                     if (!Directory.Exists(myPath))
                     {
                         Directory.CreateDirectory(myPath);
