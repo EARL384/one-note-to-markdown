@@ -17,7 +17,6 @@ namespace OneNoteMarkdownExporter
         public string? OutputPath { get; set; }
         public string? AssetsFolderPath { get; set; }
         public int? AssetOrganizationIndex { get; set; }
-        public bool? ExpandCollapsed { get; set; }
         public bool? OverwriteExisting { get; set; }
         public bool? ApplyMarkdownLinting { get; set; }
         public bool? PreserveDates { get; set; }
@@ -91,12 +90,7 @@ namespace OneNoteMarkdownExporter
                     AssetOrganizationBox.SelectedIndex = settings.AssetOrganizationIndex.Value;
                 }
 
-                if (settings.ExpandCollapsed.HasValue)
-                {
-                    ExpandCollapsedBox.IsChecked = settings.ExpandCollapsed.Value;
-                }
-
-                if (settings.OverwriteExisting.HasValue)
+if (settings.OverwriteExisting.HasValue)
                 {
                     OverwriteExistingBox.IsChecked = settings.OverwriteExisting.Value;
                 }
@@ -139,7 +133,6 @@ namespace OneNoteMarkdownExporter
                     OutputPath = OutputPathBox.Text,
                     AssetsFolderPath = AssetsPathBox.Text,
                     AssetOrganizationIndex = AssetOrganizationBox.SelectedIndex,
-                    ExpandCollapsed = ExpandCollapsedBox.IsChecked == true,
                     OverwriteExisting = OverwriteExistingBox.IsChecked == true,
                     ApplyMarkdownLinting = LintMarkdownBox.IsChecked == true,
                     PreserveDates = PreserveDatesBox.IsChecked == true,
