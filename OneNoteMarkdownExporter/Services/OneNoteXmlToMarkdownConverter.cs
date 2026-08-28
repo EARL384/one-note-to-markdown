@@ -31,6 +31,8 @@ namespace OneNoteMarkdownExporter.Services
         private string _pagePrefix = "";
         private int _imageCounter = 0;
         private int _attachmentCounter = 0;
+        private readonly Dictionary<XElement, string> _attachmentHtmlCache = new();
+        private readonly HashSet<string> _exportedPrintoutIndexes = new(StringComparer.Ordinal);
         private string _literalAnglePlaceholderPrefix = "";
         private int _literalAnglePlaceholderCounter = 0;
         private readonly Dictionary<string, string> _literalAnglePlaceholders = new();
@@ -55,6 +57,8 @@ namespace OneNoteMarkdownExporter.Services
             _pagePrefix = SanitizePrefix(pagePrefix);
             _imageCounter = 0;
             _attachmentCounter = 0;
+            _attachmentHtmlCache.Clear();
+            _exportedPrintoutIndexes.Clear();
             _literalAnglePlaceholderPrefix = $"ONENOTELITERAL{Guid.NewGuid():N}";
             _literalAnglePlaceholderCounter = 0;
             _literalAnglePlaceholders.Clear();
@@ -62,6 +66,10 @@ namespace OneNoteMarkdownExporter.Services
 
             var doc = XDocument.Parse(pageXml);
             if (doc.Root == null) return "";
+
+            // Export original attachments first so printout images can be suppressed only
+            // when the corresponding original file was actually copied successfully.
+            PrepareInsertedFiles(doc);
 
             // Build HTML first, then convert to clean Markdown using ReverseMarkdown
             var htmlBuilder = new StringBuilder();
@@ -493,6 +501,22 @@ namespace OneNoteMarkdownExporter.Services
         {
             try
             {
+                // OneNote printouts are page images generated from an inserted document.
+                // If the matching original document was exported successfully, keep only
+                // the original file and suppress these redundant printout images.
+                var isPrintOut = string.Equals(
+                    image.Attribute("isPrintOut")?.Value,
+                    "true",
+                    StringComparison.OrdinalIgnoreCase);
+                var xpsFileIndex = image.Attribute("xpsFileIndex")?.Value;
+
+                if (isPrintOut &&
+                    !string.IsNullOrWhiteSpace(xpsFileIndex) &&
+                    _exportedPrintoutIndexes.Contains(xpsFileIndex))
+                {
+                    return "";
+                }
+
                 string? base64Data = null;
                 
                 // First, try to get embedded data from the Data element
@@ -570,12 +594,71 @@ namespace OneNoteMarkdownExporter.Services
         }
 
         /// <summary>
+        /// Pre-exports all inserted files on the page. This lets image processing know
+        /// whether a matching document printout is redundant before the image is rendered.
+        /// Printout images are suppressed only after the original file was copied successfully.
+        /// </summary>
+        private void PrepareInsertedFiles(XDocument doc)
+        {
+            foreach (var insertedFile in doc.Descendants(_ns + "InsertedFile"))
+            {
+                var (html, success) = ExportInsertedFileToHtml(insertedFile);
+                _attachmentHtmlCache[insertedFile] = html;
+
+                if (!success)
+                {
+                    continue;
+                }
+
+                var xpsFileIndex = insertedFile
+                    .Element(_ns + "Printout")
+                    ?.Attribute("xpsFileIndex")
+                    ?.Value;
+
+                if (!string.IsNullOrWhiteSpace(xpsFileIndex))
+                {
+                    _exportedPrintoutIndexes.Add(xpsFileIndex);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Returns the cached attachment link created during the pre-export pass.
+        /// Falls back to exporting on demand if called for an element that was not preprocessed.
+        /// </summary>
+        private string ProcessInsertedFileToHtml(XElement insertedFile)
+        {
+            if (_attachmentHtmlCache.TryGetValue(insertedFile, out var cachedHtml))
+            {
+                return cachedHtml;
+            }
+
+            var (html, success) = ExportInsertedFileToHtml(insertedFile);
+            _attachmentHtmlCache[insertedFile] = html;
+
+            if (success)
+            {
+                var xpsFileIndex = insertedFile
+                    .Element(_ns + "Printout")
+                    ?.Attribute("xpsFileIndex")
+                    ?.Value;
+
+                if (!string.IsNullOrWhiteSpace(xpsFileIndex))
+                {
+                    _exportedPrintoutIndexes.Add(xpsFileIndex);
+                }
+            }
+
+            return html;
+        }
+
+        /// <summary>
         /// Exports an original file attached to a OneNote page (InsertedFile) into the
-        /// configured assets folder and adds a normal relative Markdown-compatible link.
+        /// configured assets folder and returns the HTML link plus a success flag.
         /// OneNote exposes the locally cached original via pathCache; pathSource is used
         /// as a fallback when the cache path is unavailable.
         /// </summary>
-        private string ProcessInsertedFileToHtml(XElement insertedFile)
+        private (string Html, bool Success) ExportInsertedFileToHtml(XElement insertedFile)
         {
             try
             {
@@ -593,7 +676,7 @@ namespace OneNoteMarkdownExporter.Services
                 if (string.IsNullOrWhiteSpace(sourcePath))
                 {
                     var details = $"preferredName={preferredName ?? "none"}, pathCache={pathCache ?? "none"}, pathSource={pathSource ?? "none"}";
-                    return $"<p><strong>[ATTACHMENT EXPORT FAILED: original file not available locally. {System.Net.WebUtility.HtmlEncode(details)}]</strong></p>";
+                    return ($"<p><strong>[ATTACHMENT EXPORT FAILED: original file not available locally. {System.Net.WebUtility.HtmlEncode(details)}]</strong></p>", false);
                 }
 
                 if (!Directory.Exists(_assetsFolder))
@@ -610,11 +693,11 @@ namespace OneNoteMarkdownExporter.Services
                 var relativePath = $"{_relativeAssetsPath}/{fileName}".Replace("\\", "/");
                 var encodedHref = System.Net.WebUtility.HtmlEncode(relativePath);
                 var encodedName = System.Net.WebUtility.HtmlEncode(displayName);
-                return $"<p><a href=\"{encodedHref}\">{encodedName}</a></p>";
+                return ($"<p><a href=\"{encodedHref}\">{encodedName}</a></p>", true);
             }
             catch (Exception ex)
             {
-                return $"<p><strong>[ATTACHMENT EXPORT FAILED: {System.Net.WebUtility.HtmlEncode(ex.Message)}]</strong></p>";
+                return ($"<p><strong>[ATTACHMENT EXPORT FAILED: {System.Net.WebUtility.HtmlEncode(ex.Message)}]</strong></p>", false);
             }
         }
 
@@ -1005,4 +1088,4 @@ namespace OneNoteMarkdownExporter.Services
             return $"[{text}]({href})";
         }
     }
-    }
+}
