@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using OneNoteMarkdownExporter.Models;
@@ -61,6 +62,26 @@ namespace OneNoteMarkdownExporter.Services
         private readonly IMarkdownLintService _cliLinter;
         private readonly IFileTimestampService _timestampService;
         private readonly IYamlFrontMatterService _yamlFrontMatterService;
+
+        private static readonly Regex OneNoteGuidRegex = new(
+            @"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}",
+            RegexOptions.Compiled);
+
+        private static readonly Regex OneNoteMarkdownPageLinkRegex = new(
+            @"\]\((?<href>onenote:[^\r\n)]*?page-id=\{(?<pageId>[0-9A-Fa-f-]{36})\}[^\r\n)]*)\)",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private sealed class PlannedPagePath
+        {
+            public PlannedPagePath(string markdownFilePath, string childPageFolderPath)
+            {
+                MarkdownFilePath = markdownFilePath;
+                ChildPageFolderPath = childPageFolderPath;
+            }
+
+            public string MarkdownFilePath { get; }
+            public string ChildPageFolderPath { get; }
+        }
 
         public ExportService()
             : this(new OneNoteService(), new OneNoteXmlToMarkdownConverter(), new MarkdownLintCliService(), new FileTimestampService(), new YamlFrontMatterService())
@@ -124,7 +145,7 @@ namespace OneNoteMarkdownExporter.Services
                 // Apply selection criteria
                 var selectedItems = ApplySelectionCriteria(notebooks, options);
 
-                return await ExportItemsAsync(selectedItems, options, progress, cancellationToken);
+                return await ExportItemsAsync(selectedItems, notebooks, options, progress, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -146,7 +167,12 @@ namespace OneNoteMarkdownExporter.Services
             try
             {
                 PrepareOptions(options);
-                return await ExportItemsAsync(items, options, progress, cancellationToken);
+
+                // Build link/path planning from the full currently opened OneNote hierarchy,
+                // not only from the selected subset. This allows links to other notebooks
+                // to be translated to their future Markdown locations.
+                var fullHierarchy = _oneNoteService.GetNotebookHierarchy();
+                return await ExportItemsAsync(items, fullHierarchy, options, progress, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -342,6 +368,7 @@ namespace OneNoteMarkdownExporter.Services
 
         private async Task<ExportResult> ExportItemsAsync(
             List<OneNoteItem> selectedItems,
+            List<OneNoteItem> hierarchyForPlanning,
             ExportOptions options,
             IProgress<ExportProgressUpdate>? progress,
             CancellationToken cancellationToken)
@@ -373,6 +400,13 @@ namespace OneNoteMarkdownExporter.Services
             }
 
             var planner = new ExportPathPlanner(options.OutputPath, options);
+
+            // Plan every currently opened OneNote page before writing anything.
+            // This gives us stable collision-safe filenames and a global page-id -> Markdown path
+            // index for rewriting OneNote links, including links across notebooks.
+            var pathPlanner = new ExportPathPlanner(options.OutputPath, options);
+            var pagePathIndex = BuildPagePathIndex(hierarchyForPlanning, pathPlanner);
+
             var centralizedAssetsRoot = options.AssetOrganizationMode == AssetOrganizationMode.Centralized
                 ? AssetPathResolver.ResolveAssetsFolderPath(options.OutputPath, options.AssetsFolderPath)
                 : null;
@@ -387,7 +421,7 @@ namespace OneNoteMarkdownExporter.Services
                 foreach (var item in selectedItems)
                 {
                     if (cancellationToken.IsCancellationRequested) break;
-                    ExportItem(item, planner.OutputRoot, centralizedAssetsRoot, null, null, planner, options, result, progress, cancellationToken);
+                    ExportItem(item, planner.OutputRoot, centralizedAssetsRoot, null, null, planner, pagePathIndex, options, result, progress, cancellationToken);
                 }
             }, cancellationToken);
 
@@ -401,6 +435,143 @@ namespace OneNoteMarkdownExporter.Services
             }
 
             return result;
+        }
+
+        private static Dictionary<string, PlannedPagePath> BuildPagePathIndex(
+            List<OneNoteItem> hierarchy,
+            ExportPathPlanner planner)
+        {
+            var index = new Dictionary<string, PlannedPagePath>(StringComparer.OrdinalIgnoreCase);
+            IndexItemsForPaths(hierarchy, planner.OutputRoot, planner, index);
+            return index;
+        }
+
+        private static void IndexItemsForPaths(
+            IReadOnlyList<OneNoteItem> items,
+            string currentPath,
+            ExportPathPlanner planner,
+            Dictionary<string, PlannedPagePath> index)
+        {
+            // Detect collisions based on the actual Windows-safe Markdown filename, not only
+            // on the visible OneNote title. This also catches titles that sanitize to the same name.
+            var pages = items.Where(item => item.Type == OneNoteItemType.Page).ToList();
+            var basePaths = pages.ToDictionary(
+                page => page,
+                page => ExportPathSanitizer.GetSafeMarkdownFilePath(currentPath, page.Name, page.Id));
+
+            var collidingPaths = new HashSet<string>(
+                basePaths
+                    .GroupBy(pair => pair.Value, StringComparer.OrdinalIgnoreCase)
+                    .Where(group => group.Count() > 1)
+                    .Select(group => group.Key),
+                StringComparer.OrdinalIgnoreCase);
+
+            foreach (var item in items)
+            {
+                if (item.Type != OneNoteItemType.Page)
+                {
+                    var containerPath = planner.GetContainerFolderPath(currentPath, item);
+                    if (item.Children.Count > 0)
+                    {
+                        IndexItemsForPaths(item.Children, containerPath, planner, index);
+                    }
+
+                    continue;
+                }
+
+                var basePath = basePaths[item];
+                var hasCollision = collidingPaths.Contains(basePath);
+                var exportedName = item.Name;
+
+                if (hasCollision)
+                {
+                    exportedName = $"{item.Name}__{ExportPathSanitizer.GetStableHashSuffix(item.Id)}";
+                }
+
+                var markdownFilePath = hasCollision
+                    ? ExportPathSanitizer.GetSafeMarkdownFilePath(currentPath, exportedName, item.Id)
+                    : basePath;
+
+                var childPageFolderPath = hasCollision
+                    ? ExportPathSanitizer.GetSafeDirectoryPath(currentPath, exportedName, item.Id)
+                    : planner.GetChildPageFolderPath(currentPath, item);
+
+                var normalizedId = NormalizeOneNotePageId(item.Id);
+                if (!string.IsNullOrWhiteSpace(normalizedId))
+                {
+                    index[normalizedId] = new PlannedPagePath(markdownFilePath, childPageFolderPath);
+                }
+
+                if (item.Children.Count > 0)
+                {
+                    IndexItemsForPaths(item.Children, childPageFolderPath, planner, index);
+                }
+            }
+        }
+
+        private static PlannedPagePath? GetPlannedPagePath(
+            OneNoteItem page,
+            IReadOnlyDictionary<string, PlannedPagePath> pagePathIndex)
+        {
+            var normalizedId = NormalizeOneNotePageId(page.Id);
+            return !string.IsNullOrWhiteSpace(normalizedId) &&
+                   pagePathIndex.TryGetValue(normalizedId, out var planned)
+                ? planned
+                : null;
+        }
+
+        private static string NormalizeOneNotePageId(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return string.Empty;
+            }
+
+            var match = OneNoteGuidRegex.Match(value);
+            return match.Success
+                ? match.Value.ToUpperInvariant()
+                : value.Trim().Trim('{', '}').ToUpperInvariant();
+        }
+
+        private static string RewriteOneNotePageLinks(
+            string markdown,
+            string currentMarkdownPath,
+            IReadOnlyDictionary<string, PlannedPagePath> pagePathIndex)
+        {
+            var currentFolder = Path.GetDirectoryName(currentMarkdownPath);
+            if (string.IsNullOrWhiteSpace(currentFolder) || string.IsNullOrWhiteSpace(markdown))
+            {
+                return markdown;
+            }
+
+            return OneNoteMarkdownPageLinkRegex.Replace(markdown, match =>
+            {
+                var pageId = NormalizeOneNotePageId(match.Groups["pageId"].Value);
+                if (string.IsNullOrWhiteSpace(pageId) ||
+                    !pagePathIndex.TryGetValue(pageId, out var target))
+                {
+                    // The target is not in the currently opened OneNote hierarchy.
+                    // Preserve the original onenote: link as a safe fallback.
+                    return match.Value;
+                }
+
+                var relativePath = Path.GetRelativePath(currentFolder, target.MarkdownFilePath)
+                    .Replace('\\', '/');
+
+                return $"]({EncodeMarkdownRelativePath(relativePath)})";
+            });
+        }
+
+        private static string EncodeMarkdownRelativePath(string relativePath)
+        {
+            return string.Join(
+                "/",
+                relativePath
+                    .Replace('\\', '/')
+                    .Split('/')
+                    .Select(segment => segment is "." or ".."
+                        ? segment
+                        : Uri.EscapeDataString(segment)));
         }
 
         private void ListItems(List<OneNoteItem> items, IProgress<ExportProgressUpdate>? progress, ExportResult result, string indent, bool isImplicitlySelected = false)
@@ -431,6 +602,7 @@ namespace OneNoteMarkdownExporter.Services
             string? notebookAssetsFolder,
             string? sectionAssetsFolder,
             ExportPathPlanner planner,
+            IReadOnlyDictionary<string, PlannedPagePath> pagePathIndex,
             ExportOptions options,
             ExportResult result,
             IProgress<ExportProgressUpdate>? progress,
@@ -472,7 +644,7 @@ namespace OneNoteMarkdownExporter.Services
                 {
                     if (token.IsCancellationRequested) return;
 
-                    ExportItem(child, myPath, centralizedAssetsRoot, childNotebookAssetsFolder, childSectionAssetsFolder, planner, options, result, progress, token, isSelected);
+                    ExportItem(child, myPath, centralizedAssetsRoot, childNotebookAssetsFolder, childSectionAssetsFolder, planner, pagePathIndex, options, result, progress, token, isSelected);
                 }
             }
             else
@@ -482,12 +654,14 @@ namespace OneNoteMarkdownExporter.Services
                 {
                     var assetsFolderPath = GetAssetsFolderPathForPage(item, currentPath, centralizedAssetsRoot, notebookAssetsFolder, sectionAssetsFolder, planner, options);
                     var pageContext = planner.CreatePageContext(item, currentPath, assetsFolderPath);
-                    ExportPage(pageContext, options, result, progress, token);
+                    var plannedPagePath = GetPlannedPagePath(item, pagePathIndex);
+                    ExportPage(pageContext, plannedPagePath?.MarkdownFilePath, pagePathIndex, options, result, progress, token);
                 }
 
                 if (item.Children.Count > 0)
                 {
-                    myPath = planner.GetChildPageFolderPath(currentPath, item);
+                    myPath = GetPlannedPagePath(item, pagePathIndex)?.ChildPageFolderPath
+                        ?? planner.GetChildPageFolderPath(currentPath, item);
                     if (!Directory.Exists(myPath))
                     {
                         Directory.CreateDirectory(myPath);
@@ -497,7 +671,7 @@ namespace OneNoteMarkdownExporter.Services
                     {
                         if (token.IsCancellationRequested) return;
 
-                        ExportItem(child, myPath, centralizedAssetsRoot, notebookAssetsFolder, sectionAssetsFolder, planner, options, result, progress, token, isSelected);
+                        ExportItem(child, myPath, centralizedAssetsRoot, notebookAssetsFolder, sectionAssetsFolder, planner, pagePathIndex, options, result, progress, token, isSelected);
                     }
                 }
             }
@@ -524,6 +698,8 @@ namespace OneNoteMarkdownExporter.Services
 
         private void ExportPage(
             PageExportContext pageContext,
+            string? plannedMarkdownFilePath,
+            IReadOnlyDictionary<string, PlannedPagePath> pagePathIndex,
             ExportOptions options,
             ExportResult result,
             IProgress<ExportProgressUpdate>? progress,
@@ -532,15 +708,14 @@ namespace OneNoteMarkdownExporter.Services
             if (token.IsCancellationRequested) return;
 
             var page = pageContext.Page;
+            var finalMdPath = plannedMarkdownFilePath ?? pageContext.MarkdownFilePath;
 
             if (!options.Quiet)
             {
-                Report(progress, ExportProgressKind.PageStarted, $"Exporting: {page.Name}", result, page, pageContext.MarkdownFilePath);
+                Report(progress, ExportProgressKind.PageStarted, $"Exporting: {page.Name}", result, page, finalMdPath);
             }
 
             Directory.CreateDirectory(pageContext.MarkdownFolderPath);
-
-            var finalMdPath = pageContext.MarkdownFilePath;
 
             // Handle file existence based on overwrite setting
             if (File.Exists(finalMdPath))
@@ -577,6 +752,10 @@ namespace OneNoteMarkdownExporter.Services
                 // Convert XML directly to Markdown (no Publish API needed)
                 // Use page name as prefix to avoid image filename collisions across pages
                 var markdown = _xmlConverter.Convert(pageXml, pageContext.AssetsFolderPath, pageContext.RelativeAssetsPath, binaryFetcher, page.Name);
+
+                // Translate OneNote page links to portable relative Markdown links whenever
+                // the target page is known in the currently opened OneNote hierarchy.
+                markdown = RewriteOneNotePageLinks(markdown, finalMdPath, pagePathIndex);
 
                 if (options.DateMetadataMode == DateMetadataMode.Yaml)
                 {
