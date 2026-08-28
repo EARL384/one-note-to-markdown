@@ -812,9 +812,11 @@ namespace OneNoteMarkdownExporter.Services
                 // Create a binary content fetcher for images that aren't embedded
                 BinaryContentFetcher binaryFetcher = (callbackId) => _oneNoteService.GetBinaryPageContent(page.Id, callbackId);
 
-                // Convert XML directly to Markdown (no Publish API needed)
-                // Use page name as prefix to avoid image filename collisions across pages
-                var markdown = _xmlConverter.Convert(pageXml, pageContext.AssetsFolderPath, pageContext.RelativeAssetsPath, binaryFetcher, page.Name);
+                // Convert XML directly to Markdown (no Publish API needed).
+                // Use the final collision-safe Markdown filename stem as the asset prefix so
+                // duplicate page titles cannot overwrite each other's images or attachments.
+                var assetPagePrefix = Path.GetFileNameWithoutExtension(finalMdPath);
+                var markdown = _xmlConverter.Convert(pageXml, pageContext.AssetsFolderPath, pageContext.RelativeAssetsPath, binaryFetcher, assetPagePrefix);
 
                 // Translate OneNote page links to portable relative Markdown links whenever
                 // the target page is known in the currently opened OneNote hierarchy.
