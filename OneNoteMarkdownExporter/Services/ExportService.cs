@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using OneNoteMarkdownExporter.Models;
@@ -74,12 +75,26 @@ namespace OneNoteMarkdownExporter.Services
         private readonly IFileTimestampService _timestampService;
         private readonly IYamlFrontMatterService _yamlFrontMatterService;
 
-        // Session-only cache for the expensive OneNote COM conversion from a
+        // Persistent cache for the expensive OneNote COM conversion from a
         // runtime hierarchy ID to the portable page-id used in onenote: links.
-        // The cache lives only as long as this ExportService instance (normally
-        // one exporter program session) and never writes anything back to OneNote.
-        private readonly Dictionary<string, string> _hyperlinkPageIdSessionCache =
+        // Only successful ID mappings are stored. The Markdown target path itself
+        // is never cached and is recalculated from the current OneNote hierarchy
+        // on every export. This cache is entirely separate from OneNote's own cache
+        // and never writes anything back to OneNote.
+        private const int HyperlinkCacheSchemaVersion = 1;
+        private const string HyperlinkCacheFileName = "hyperlink-cache.json";
+
+        private readonly Dictionary<string, string> _hyperlinkPageIdCache =
             new(StringComparer.OrdinalIgnoreCase);
+
+        private readonly string _hyperlinkCacheFilePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "OneNoteMarkdownExporter",
+            HyperlinkCacheFileName);
+
+        private bool _persistentHyperlinkCacheLoaded;
+        private bool _persistentHyperlinkCacheDirty;
+        private int _persistentHyperlinkCacheEntriesLoaded;
 
         private static readonly Regex OneNoteGuidRegex = new(
             @"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}",
@@ -127,9 +142,18 @@ namespace OneNoteMarkdownExporter.Services
             public int HyperlinkCacheMisses { get; set; }
             public int HyperlinkCalls { get; set; }
             public int HyperlinksWithoutPageId { get; set; }
-            public int SessionCacheEntriesAfterBuild { get; set; }
+            public int PersistentCacheEntriesLoaded { get; set; }
+            public int CacheEntriesBeforeBuild { get; set; }
+            public int CacheEntriesAfterBuild { get; set; }
+            public int NewCacheEntries { get; set; }
             public TimeSpan HyperlinkTotalElapsed { get; set; }
             public TimeSpan SlowestHyperlinkElapsed { get; set; }
+        }
+
+        private sealed class PersistentHyperlinkCacheData
+        {
+            public int SchemaVersion { get; set; } = HyperlinkCacheSchemaVersion;
+            public Dictionary<string, string> Entries { get; set; } = new();
         }
 
         public ExportService()
@@ -466,12 +490,30 @@ namespace OneNoteMarkdownExporter.Services
             // This gives us stable collision-safe filenames and a global page-id -> Markdown path
             // index for rewriting OneNote links, including links across notebooks.
             var pathPlanner = new ExportPathPlanner(options.OutputPath, options);
-            var indexPerformanceStats = new LinkIndexPerformanceStats();
+
+            // Load the exporter-owned persistent hyperlink cache before building the
+            // global link index. The cache is additive: entries are NOT removed merely
+            // because a page/notebook is absent from the currently loaded hierarchy.
+            // This is important when OneNote notebooks are loaded or synchronized only
+            // gradually or manually.
+            EnsurePersistentHyperlinkCacheLoaded(progress, result);
+
+            var indexPerformanceStats = new LinkIndexPerformanceStats
+            {
+                PersistentCacheEntriesLoaded = _persistentHyperlinkCacheEntriesLoaded,
+                CacheEntriesBeforeBuild = _hyperlinkPageIdCache.Count
+            };
+
             var indexStopwatch = Stopwatch.StartNew();
             var pagePathIndexes = BuildPagePathIndexes(hierarchyForPlanning, pathPlanner, indexPerformanceStats);
             indexStopwatch.Stop();
 
-            indexPerformanceStats.SessionCacheEntriesAfterBuild = _hyperlinkPageIdSessionCache.Count;
+            indexPerformanceStats.CacheEntriesAfterBuild = _hyperlinkPageIdCache.Count;
+            indexPerformanceStats.NewCacheEntries = Math.Max(
+                0,
+                indexPerformanceStats.CacheEntriesAfterBuild - indexPerformanceStats.CacheEntriesBeforeBuild);
+
+            SavePersistentHyperlinkCache(progress, result);
             ReportLinkIndexPerformance(progress, result, indexStopwatch.Elapsed, indexPerformanceStats);
 
             var centralizedAssetsRoot = options.AssetOrganizationMode == AssetOrganizationMode.Centralized
@@ -580,8 +622,7 @@ namespace OneNoteMarkdownExporter.Services
                 // Build a separate portable hyperlink page-id -> path index. OneNote itself
                 // performs the conversion from the runtime hierarchy ID to the hyperlink ID.
                 //
-                // GetHyperlinkToObject is a comparatively expensive COM round-trip. During
-                // one exporter program session we therefore reuse a successful conversion for
+                // GetHyperlinkToObject is a comparatively expensive COM round-trip. Across exporter runs we therefore reuse a successful conversion for
                 // the same complete hierarchy/runtime ID. Only this ID conversion is cached;
                 // the Markdown target path is still recalculated from the current hierarchy on
                 // every export, preserving the existing rename/collision/path behavior.
@@ -591,7 +632,7 @@ namespace OneNoteMarkdownExporter.Services
                     string hyperlinkPageId;
 
                     if (!string.IsNullOrWhiteSpace(cacheKey) &&
-                        _hyperlinkPageIdSessionCache.TryGetValue(cacheKey, out var cachedHyperlinkPageId))
+                        _hyperlinkPageIdCache.TryGetValue(cacheKey, out var cachedHyperlinkPageId))
                     {
                         performanceStats.HyperlinkCacheHits++;
                         hyperlinkPageId = cachedHyperlinkPageId;
@@ -622,7 +663,8 @@ namespace OneNoteMarkdownExporter.Services
                         if (!string.IsNullOrWhiteSpace(hyperlinkPageId) &&
                             !string.IsNullOrWhiteSpace(cacheKey))
                         {
-                            _hyperlinkPageIdSessionCache[cacheKey] = hyperlinkPageId;
+                            _hyperlinkPageIdCache[cacheKey] = hyperlinkPageId;
+                            _persistentHyperlinkCacheDirty = true;
                         }
                     }
 
@@ -640,6 +682,135 @@ namespace OneNoteMarkdownExporter.Services
                 {
                     IndexItemsForPaths(item.Children, childPageFolderPath, planner, indexes, performanceStats);
                 }
+            }
+        }
+
+        private void EnsurePersistentHyperlinkCacheLoaded(
+            IProgress<ExportProgressUpdate>? progress,
+            ExportResult result)
+        {
+            if (_persistentHyperlinkCacheLoaded)
+            {
+                return;
+            }
+
+            _persistentHyperlinkCacheLoaded = true;
+
+            if (!File.Exists(_hyperlinkCacheFilePath))
+            {
+                _persistentHyperlinkCacheEntriesLoaded = 0;
+                Report(
+                    progress,
+                    ExportProgressKind.Message,
+                    $"Hyperlink cache: no persistent cache found; starting empty. Cache path: {_hyperlinkCacheFilePath}",
+                    result);
+                return;
+            }
+
+            try
+            {
+                var json = File.ReadAllText(_hyperlinkCacheFilePath);
+                var cacheData = JsonSerializer.Deserialize<PersistentHyperlinkCacheData>(
+                    json,
+                    new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true
+                    });
+
+                if (cacheData == null || cacheData.SchemaVersion != HyperlinkCacheSchemaVersion)
+                {
+                    _persistentHyperlinkCacheEntriesLoaded = 0;
+                    Report(
+                        progress,
+                        ExportProgressKind.Warning,
+                        $"Hyperlink cache ignored because its format/version is not supported. A new cache will be built at: {_hyperlinkCacheFilePath}",
+                        result);
+                    return;
+                }
+
+                foreach (var entry in cacheData.Entries)
+                {
+                    var hierarchyId = NormalizeHierarchyId(entry.Key);
+                    var hyperlinkPageId = NormalizeHyperlinkPageId(entry.Value);
+
+                    if (!string.IsNullOrWhiteSpace(hierarchyId) &&
+                        !string.IsNullOrWhiteSpace(hyperlinkPageId))
+                    {
+                        _hyperlinkPageIdCache[hierarchyId] = hyperlinkPageId;
+                    }
+                }
+
+                _persistentHyperlinkCacheEntriesLoaded = _hyperlinkPageIdCache.Count;
+                Report(
+                    progress,
+                    ExportProgressKind.Message,
+                    $"Hyperlink cache: loaded {_persistentHyperlinkCacheEntriesLoaded} persistent mapping(s) from: {_hyperlinkCacheFilePath}",
+                    result);
+            }
+            catch (Exception ex)
+            {
+                _hyperlinkPageIdCache.Clear();
+                _persistentHyperlinkCacheEntriesLoaded = 0;
+                Report(
+                    progress,
+                    ExportProgressKind.Warning,
+                    $"Hyperlink cache could not be read and will be rebuilt as needed: {ex.Message}",
+                    result);
+            }
+        }
+
+        private void SavePersistentHyperlinkCache(
+            IProgress<ExportProgressUpdate>? progress,
+            ExportResult result)
+        {
+            if (!_persistentHyperlinkCacheDirty)
+            {
+                return;
+            }
+
+            try
+            {
+                var cacheDirectory = Path.GetDirectoryName(_hyperlinkCacheFilePath);
+                if (string.IsNullOrWhiteSpace(cacheDirectory))
+                {
+                    throw new InvalidOperationException("Could not determine hyperlink cache directory.");
+                }
+
+                Directory.CreateDirectory(cacheDirectory);
+
+                var cacheData = new PersistentHyperlinkCacheData
+                {
+                    SchemaVersion = HyperlinkCacheSchemaVersion,
+                    Entries = new Dictionary<string, string>(
+                        _hyperlinkPageIdCache,
+                        StringComparer.OrdinalIgnoreCase)
+                };
+
+                var json = JsonSerializer.Serialize(
+                    cacheData,
+                    new JsonSerializerOptions
+                    {
+                        WriteIndented = true
+                    });
+
+                var tempPath = _hyperlinkCacheFilePath + ".tmp";
+                File.WriteAllText(tempPath, json);
+                File.Move(tempPath, _hyperlinkCacheFilePath, true);
+
+                _persistentHyperlinkCacheDirty = false;
+                Report(
+                    progress,
+                    ExportProgressKind.Message,
+                    $"Hyperlink cache: saved {_hyperlinkPageIdCache.Count} mapping(s) to: {_hyperlinkCacheFilePath}",
+                    result);
+            }
+            catch (Exception ex)
+            {
+                Report(
+                    progress,
+                    ExportProgressKind.Warning,
+                    $"Hyperlink cache could not be saved. Export continues normally: {ex.Message}",
+                    result);
             }
         }
 
@@ -682,7 +853,22 @@ namespace OneNoteMarkdownExporter.Services
             Report(
                 progress,
                 ExportProgressKind.Message,
-                $"PERF: Session hyperlink cache entries: {performanceStats.SessionCacheEntriesAfterBuild}.",
+                $"PERF: Persistent hyperlink cache entries loaded: {performanceStats.PersistentCacheEntriesLoaded}.",
+                result);
+            Report(
+                progress,
+                ExportProgressKind.Message,
+                $"PERF: Hyperlink cache entries before build: {performanceStats.CacheEntriesBeforeBuild}.",
+                result);
+            Report(
+                progress,
+                ExportProgressKind.Message,
+                $"PERF: New hyperlink cache entries: {performanceStats.NewCacheEntries}.",
+                result);
+            Report(
+                progress,
+                ExportProgressKind.Message,
+                $"PERF: Hyperlink cache entries after build: {performanceStats.CacheEntriesAfterBuild}.",
                 result);
             Report(
                 progress,
