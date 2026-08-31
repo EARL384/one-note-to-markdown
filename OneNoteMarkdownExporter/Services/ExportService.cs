@@ -65,6 +65,7 @@ namespace OneNoteMarkdownExporter.Services
         int SuccessfulImageExports { get; }
         int FailedImageExports { get; }
         int SuppressedPrintoutImages { get; }
+        IReadOnlyList<string> AttachmentFailureDiagnostics { get; }
     }
 
     public interface IMarkdownLintService
@@ -1308,6 +1309,21 @@ namespace OneNoteMarkdownExporter.Services
                         result,
                         page,
                         finalMdPath);
+
+                    if (_xmlConverter is IAssetExportStatisticsProvider statsProvider
+                        && statsProvider.AttachmentFailureDiagnostics.Count > 0)
+                    {
+                        foreach (var diagnostic in statsProvider.AttachmentFailureDiagnostics)
+                        {
+                            Report(
+                                progress,
+                                ExportProgressKind.Warning,
+                                $"  ATTACHMENT DIAGNOSTIC: {diagnostic}",
+                                result,
+                                page,
+                                finalMdPath);
+                        }
+                    }
                 }
 
                 // Translate OneNote page links to portable relative Markdown links whenever
