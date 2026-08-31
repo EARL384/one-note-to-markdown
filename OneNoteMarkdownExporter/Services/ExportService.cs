@@ -108,6 +108,29 @@ namespace OneNoteMarkdownExporter.Services
             @"page-id=\{(?<pageId>[0-9A-Fa-f-]{36})\}",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+        // COMPLETENESS DIAGNOSTICS ONLY.
+        // Count source objects from OneNote page XML and compare them with the
+        // converter output. This does not change export behavior or OneNote content.
+        private static readonly Regex OneNoteInsertedFileElementRegex = new(
+            @"<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?InsertedFile\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex OneNoteImageElementRegex = new(
+            @"<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?Image\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex AttachmentExportFailureRegex = new(
+            @"\[ATTACHMENT EXPORT FAILED:",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex ImageExportFailureRegex = new(
+            @"\[(?:Image - no embedded data, could not fetch binary content\.|Image export failed:)",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex MarkdownImageRegex = new(
+            @"!\[[^\]]*\]\([^\r\n)]*\)",
+            RegexOptions.Compiled);
+
         private sealed class PlannedPagePath
         {
             public PlannedPagePath(string markdownFilePath, string childPageFolderPath)
@@ -643,6 +666,7 @@ namespace OneNoteMarkdownExporter.Services
             }
             else
             {
+                ReportCompletenessStatistics(progress, result);
                 Report(progress, ExportProgressKind.Completed, $"Export completed. {result.ExportedPages} page(s) exported, {result.FailedPages} failed.", result);
             }
 
@@ -1269,6 +1293,13 @@ namespace OneNoteMarkdownExporter.Services
                 // Get page content directly via XML (bypasses DLP/Publish restrictions)
                 var pageXml = _oneNoteService.GetPageContent(page.Id);
 
+                // Record how many attachments and images OneNote exposes on this page.
+                // The converter already emits explicit failure placeholders when an
+                // attachment or image cannot be exported, so these counts can be
+                // reconciled after conversion without changing the converter itself.
+                var sourceAttachmentsOnPage = OneNoteInsertedFileElementRegex.Matches(pageXml).Count;
+                var sourceImagesOnPage = OneNoteImageElementRegex.Matches(pageXml).Count;
+
                 // Create a binary content fetcher for images that aren't embedded
                 BinaryContentFetcher binaryFetcher = (callbackId) => _oneNoteService.GetBinaryPageContent(page.Id, callbackId);
 
@@ -1277,6 +1308,28 @@ namespace OneNoteMarkdownExporter.Services
                 // duplicate page titles cannot overwrite each other's images or attachments.
                 var assetPagePrefix = Path.GetFileNameWithoutExtension(finalMdPath);
                 var markdown = _xmlConverter.Convert(pageXml, pageContext.AssetsFolderPath, pageContext.RelativeAssetsPath, binaryFetcher, assetPagePrefix);
+
+                var completenessOnPage = UpdateCompletenessStatistics(
+                    result,
+                    sourceAttachmentsOnPage,
+                    sourceImagesOnPage,
+                    markdown);
+
+                if (completenessOnPage.FailedAttachments > 0 || completenessOnPage.FailedImages > 0)
+                {
+                    var completenessWarning =
+                        $"Warning: COMPLETENESS issue on '{page.Name}': " +
+                        $"{completenessOnPage.FailedAttachments} attachment failure(s), " +
+                        $"{completenessOnPage.FailedImages} image failure(s).";
+                    result.Warnings.Add(completenessWarning);
+                    Report(
+                        progress,
+                        ExportProgressKind.Warning,
+                        completenessWarning,
+                        result,
+                        page,
+                        finalMdPath);
+                }
 
                 // Translate OneNote page links to portable relative Markdown links whenever
                 // the target page is known in the currently opened OneNote hierarchy.
@@ -1334,6 +1387,71 @@ namespace OneNoteMarkdownExporter.Services
                 var failureDetails = ExportFailureFormatter.FormatPageFailure(page, finalMdPath, ex);
                 result.Failures.Add(failureDetails);
                 Report(progress, ExportProgressKind.PageFailed, $"  Error exporting '{page.Name}': {ex.Message}", result, page, finalMdPath, failureDetails);
+            }
+        }
+
+        private static (int FailedAttachments, int FailedImages) UpdateCompletenessStatistics(
+            ExportResult result,
+            int sourceAttachmentsOnPage,
+            int sourceImagesOnPage,
+            string markdown)
+        {
+            var failedAttachmentsOnPage = AttachmentExportFailureRegex.Matches(markdown).Count;
+            var failedImagesOnPage = ImageExportFailureRegex.Matches(markdown).Count;
+            var exportedImagesOnPage = MarkdownImageRegex.Matches(markdown).Count;
+
+            var exportedAttachmentsOnPage = Math.Max(
+                0,
+                sourceAttachmentsOnPage - failedAttachmentsOnPage);
+
+            // Printout images belonging to a successfully exported original document are
+            // intentionally suppressed by the converter. Any remaining source image that
+            // is neither exported nor failed is therefore reported separately instead of
+            // being treated as a failure.
+            var suppressedOrNotExportedImagesOnPage = Math.Max(
+                0,
+                sourceImagesOnPage - exportedImagesOnPage - failedImagesOnPage);
+
+            result.SourceAttachments += sourceAttachmentsOnPage;
+            result.ExportedAttachments += exportedAttachmentsOnPage;
+            result.FailedAttachments += failedAttachmentsOnPage;
+            result.SourceImages += sourceImagesOnPage;
+            result.ExportedImages += exportedImagesOnPage;
+            result.FailedImages += failedImagesOnPage;
+            result.SuppressedOrNotExportedImages += suppressedOrNotExportedImagesOnPage;
+
+            return (failedAttachmentsOnPage, failedImagesOnPage);
+        }
+
+        private static void ReportCompletenessStatistics(
+            IProgress<ExportProgressUpdate>? progress,
+            ExportResult result)
+        {
+            Report(
+                progress,
+                ExportProgressKind.Message,
+                $"COMPLETENESS: Attachments: found {result.SourceAttachments}, exported {result.ExportedAttachments}, failed {result.FailedAttachments}.",
+                result);
+
+            Report(
+                progress,
+                ExportProgressKind.Message,
+                $"COMPLETENESS: Images: found {result.SourceImages}, exported {result.ExportedImages}, failed {result.FailedImages}, suppressed/not exported {result.SuppressedOrNotExportedImages}.",
+                result);
+
+            if (result.FailedAttachments == 0 && result.FailedImages == 0)
+            {
+                Report(
+                    progress,
+                    ExportProgressKind.Message,
+                    "COMPLETENESS: No attachment or image export failures detected.",
+                    result);
+            }
+            else
+            {
+                var warning = $"Warning: COMPLETENESS check detected {result.FailedAttachments} attachment failure(s) and {result.FailedImages} image failure(s). Search this log for 'COMPLETENESS issue on'.";
+                result.Warnings.Add(warning);
+                Report(progress, ExportProgressKind.Warning, warning, result);
             }
         }
 
@@ -1401,6 +1519,13 @@ namespace OneNoteMarkdownExporter.Services
         public int TotalPages { get; set; }
         public int ExportedPages { get; set; }
         public int FailedPages { get; set; }
+        public int SourceAttachments { get; set; }
+        public int ExportedAttachments { get; set; }
+        public int FailedAttachments { get; set; }
+        public int SourceImages { get; set; }
+        public int ExportedImages { get; set; }
+        public int FailedImages { get; set; }
+        public int SuppressedOrNotExportedImages { get; set; }
         public string? Error { get; set; }
         public List<string> Failures { get; } = new();
         public List<string> Warnings { get; } = new();
