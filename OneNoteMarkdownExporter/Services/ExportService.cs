@@ -56,6 +56,17 @@ namespace OneNoteMarkdownExporter.Services
         string Convert(string pageXml, string assetsFolder, string relativeAssetsPath, BinaryContentFetcher? binaryContentFetcher = null, string? pagePrefix = null);
     }
 
+    public interface IAssetExportStatisticsProvider
+    {
+        int SourceAttachments { get; }
+        int SuccessfulAttachmentExports { get; }
+        int FailedAttachmentExports { get; }
+        int SourceImages { get; }
+        int SuccessfulImageExports { get; }
+        int FailedImageExports { get; }
+        int SuppressedPrintoutImages { get; }
+    }
+
     public interface IMarkdownLintService
     {
         bool IsAvailable { get; }
@@ -107,38 +118,6 @@ namespace OneNoteMarkdownExporter.Services
         private static readonly Regex OneNoteHyperlinkPageIdRegex = new(
             @"page-id=\{(?<pageId>[0-9A-Fa-f-]{36})\}",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-        // COMPLETENESS DIAGNOSTICS ONLY.
-        // Count source objects from OneNote page XML and compare them with the
-        // converter output. This does not change export behavior or OneNote content.
-        private static readonly Regex OneNoteInsertedFileElementRegex = new(
-            @"<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?InsertedFile\b",
-            RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-        private static readonly Regex OneNoteImageElementRegex = new(
-            @"<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?Image\b",
-            RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-        // A successful attachment export is represented by a Markdown link whose
-        // generated target name contains "_attachment_". The converter emits that
-        // link only after File.Copy has completed successfully, so this gives us a
-        // write-success signal without scanning the (possibly network-based) assets
-        // directory for every page.
-        private static readonly Regex MarkdownAttachmentLinkRegex = new(
-            @"\[[^\]]*\]\([^\r\n)]*_attachment_[^\r\n)]*\)",
-            RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-        private static readonly Regex AttachmentExportFailureRegex = new(
-            @"\[ATTACHMENT EXPORT FAILED:",
-            RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-        private static readonly Regex ImageExportFailureRegex = new(
-            @"\[(?:Image - no embedded data, could not fetch binary content\.|Image export failed:)",
-            RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-        private static readonly Regex MarkdownImageRegex = new(
-            @"!\[[^\]]*\]\([^\r\n)]*\)",
-            RegexOptions.Compiled);
 
         private sealed class PlannedPagePath
         {
@@ -1302,13 +1281,6 @@ namespace OneNoteMarkdownExporter.Services
                 // Get page content directly via XML (bypasses DLP/Publish restrictions)
                 var pageXml = _oneNoteService.GetPageContent(page.Id);
 
-                // Record how many attachments and images OneNote exposes on this page.
-                // The converter already emits explicit failure placeholders when an
-                // attachment or image cannot be exported, so these counts can be
-                // reconciled after conversion without changing the converter itself.
-                var sourceAttachmentsOnPage = OneNoteInsertedFileElementRegex.Matches(pageXml).Count;
-                var sourceImagesOnPage = OneNoteImageElementRegex.Matches(pageXml).Count;
-
                 // Create a binary content fetcher for images that aren't embedded
                 BinaryContentFetcher binaryFetcher = (callbackId) => _oneNoteService.GetBinaryPageContent(page.Id, callbackId);
 
@@ -1320,9 +1292,7 @@ namespace OneNoteMarkdownExporter.Services
 
                 var completenessOnPage = UpdateCompletenessStatistics(
                     result,
-                    sourceAttachmentsOnPage,
-                    sourceImagesOnPage,
-                    markdown);
+                    _xmlConverter as IAssetExportStatisticsProvider);
 
                 if (completenessOnPage.FailedAttachments > 0 || completenessOnPage.FailedImages > 0)
                 {
@@ -1401,62 +1371,23 @@ namespace OneNoteMarkdownExporter.Services
 
         private static (int FailedAttachments, int FailedImages) UpdateCompletenessStatistics(
             ExportResult result,
-            int sourceAttachmentsOnPage,
-            int sourceImagesOnPage,
-            string markdown)
+            IAssetExportStatisticsProvider? stats)
         {
-            // FAST COMPLETENESS CHECK:
-            // Do not enumerate or stat files in the assets directory here. On a NAS that
-            // turns a cheap per-page diagnostic into thousands of network round-trips.
-            // Instead, use the converter's output as the success signal:
-            //   * attachment link -> File.Copy completed successfully
-            //   * Markdown image -> File.WriteAllBytes completed successfully
-            // Failure placeholders remain useful as a defensive cross-check.
-            var attachmentLinksOnPage = MarkdownAttachmentLinkRegex.Matches(markdown).Count;
-            var explicitAttachmentFailuresOnPage = AttachmentExportFailureRegex.Matches(markdown).Count;
-            var explicitImageFailuresOnPage = ImageExportFailureRegex.Matches(markdown).Count;
-            var markdownImagesOnPage = MarkdownImageRegex.Matches(markdown).Count;
+            if (stats == null)
+            {
+                return (0, 0);
+            }
 
-            var exportedAttachmentsOnPage = Math.Min(
-                sourceAttachmentsOnPage,
-                attachmentLinksOnPage);
+            result.SourceAttachments += stats.SourceAttachments;
+            result.ExportedAttachments += stats.SuccessfulAttachmentExports;
+            result.FailedAttachments += stats.FailedAttachmentExports;
 
-            var inferredAttachmentFailuresOnPage = Math.Max(
-                0,
-                sourceAttachmentsOnPage - exportedAttachmentsOnPage);
+            result.SourceImages += stats.SourceImages;
+            result.ExportedImages += stats.SuccessfulImageExports;
+            result.FailedImages += stats.FailedImageExports;
+            result.SuppressedOrNotExportedImages += stats.SuppressedPrintoutImages;
 
-            var failedAttachmentsOnPage = Math.Min(
-                sourceAttachmentsOnPage,
-                Math.Max(inferredAttachmentFailuresOnPage, explicitAttachmentFailuresOnPage));
-
-            var exportedImagesOnPage = Math.Min(
-                sourceImagesOnPage,
-                markdownImagesOnPage);
-
-            // Printout images belonging to a successfully exported original document are
-            // intentionally suppressed by the converter. Therefore only explicit image
-            // failure placeholders count as failures; the remainder is reported separately.
-            var possibleMissingImagesOnPage = Math.Max(
-                0,
-                sourceImagesOnPage - exportedImagesOnPage);
-
-            var failedImagesOnPage = Math.Min(
-                explicitImageFailuresOnPage,
-                possibleMissingImagesOnPage);
-
-            var suppressedOrNotExportedImagesOnPage = Math.Max(
-                0,
-                sourceImagesOnPage - exportedImagesOnPage - failedImagesOnPage);
-
-            result.SourceAttachments += sourceAttachmentsOnPage;
-            result.ExportedAttachments += exportedAttachmentsOnPage;
-            result.FailedAttachments += failedAttachmentsOnPage;
-            result.SourceImages += sourceImagesOnPage;
-            result.ExportedImages += exportedImagesOnPage;
-            result.FailedImages += failedImagesOnPage;
-            result.SuppressedOrNotExportedImages += suppressedOrNotExportedImagesOnPage;
-
-            return (failedAttachmentsOnPage, failedImagesOnPage);
+            return (stats.FailedAttachmentExports, stats.FailedImageExports);
         }
 
         private static void ReportCompletenessStatistics(
@@ -1466,13 +1397,13 @@ namespace OneNoteMarkdownExporter.Services
             Report(
                 progress,
                 ExportProgressKind.Message,
-                $"COMPLETENESS: Attachments: found {result.SourceAttachments}, converter-confirmed {result.ExportedAttachments}, failed {result.FailedAttachments}.",
+                $"COMPLETENESS: Attachments: found {result.SourceAttachments}, successfully written {result.ExportedAttachments}, failed {result.FailedAttachments}.",
                 result);
 
             Report(
                 progress,
                 ExportProgressKind.Message,
-                $"COMPLETENESS: Images: found {result.SourceImages}, converter-confirmed {result.ExportedImages}, failed {result.FailedImages}, suppressed/not exported {result.SuppressedOrNotExportedImages}.",
+                $"COMPLETENESS: Images: found {result.SourceImages}, successfully written {result.ExportedImages}, failed {result.FailedImages}, printout images intentionally suppressed {result.SuppressedOrNotExportedImages}.",
                 result);
 
             if (result.FailedAttachments == 0 && result.FailedImages == 0)
