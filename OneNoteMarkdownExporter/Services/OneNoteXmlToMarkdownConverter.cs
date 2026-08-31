@@ -726,7 +726,28 @@ namespace OneNoteMarkdownExporter.Services
                 var fileName = GetSafeAttachmentFileName(displayName, _attachmentCounter);
                 var filePath = Path.Combine(_assetsFolder, fileName);
 
+                // OneNote cache files can carry the ReadOnly attribute. File.Copy
+                // preserves that attribute on the exported copy. On a later overwrite
+                // run, File.Copy(..., overwrite: true) then throws UnauthorizedAccessException
+                // if the existing target is still read-only. Clear ReadOnly on the exporter-
+                // owned target before and after copying. This never changes the OneNote source.
+                if (File.Exists(filePath))
+                {
+                    var existingAttributes = File.GetAttributes(filePath);
+                    if ((existingAttributes & FileAttributes.ReadOnly) != 0)
+                    {
+                        File.SetAttributes(filePath, existingAttributes & ~FileAttributes.ReadOnly);
+                    }
+                }
+
                 File.Copy(sourcePath, filePath, true);
+
+                var copiedAttributes = File.GetAttributes(filePath);
+                if ((copiedAttributes & FileAttributes.ReadOnly) != 0)
+                {
+                    File.SetAttributes(filePath, copiedAttributes & ~FileAttributes.ReadOnly);
+                }
+
                 SuccessfulAttachmentExports++;
 
                 var relativePath = $"{_relativeAssetsPath}/{fileName}".Replace("\\", "/");
