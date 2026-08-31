@@ -22,7 +22,7 @@ namespace OneNoteMarkdownExporter.Services
     /// This bypasses DLP/sensitivity label restrictions that block the Publish() method.
     /// Uses ReverseMarkdown for proper HTML-to-Markdown conversion.
     /// </summary>
-    public class OneNoteXmlToMarkdownConverter : IMarkdownContentConverter
+    public class OneNoteXmlToMarkdownConverter : IMarkdownContentConverter, IAssetExportStatisticsProvider
     {
         private readonly XNamespace _ns = "http://schemas.microsoft.com/office/onenote/2013/onenote";
         private readonly Converter _markdownConverter;
@@ -37,6 +37,14 @@ namespace OneNoteMarkdownExporter.Services
         private int _literalAnglePlaceholderCounter = 0;
         private readonly Dictionary<string, string> _literalAnglePlaceholders = new();
         private BinaryContentFetcher? _binaryContentFetcher;
+
+        public int SourceAttachments { get; private set; }
+        public int SuccessfulAttachmentExports { get; private set; }
+        public int FailedAttachmentExports { get; private set; }
+        public int SourceImages { get; private set; }
+        public int SuccessfulImageExports { get; private set; }
+        public int FailedImageExports { get; private set; }
+        public int SuppressedPrintoutImages { get; private set; }
 
         public OneNoteXmlToMarkdownConverter()
         {
@@ -63,9 +71,19 @@ namespace OneNoteMarkdownExporter.Services
             _literalAnglePlaceholderCounter = 0;
             _literalAnglePlaceholders.Clear();
             _binaryContentFetcher = binaryContentFetcher;
+            SourceAttachments = 0;
+            SuccessfulAttachmentExports = 0;
+            FailedAttachmentExports = 0;
+            SourceImages = 0;
+            SuccessfulImageExports = 0;
+            FailedImageExports = 0;
+            SuppressedPrintoutImages = 0;
 
             var doc = XDocument.Parse(pageXml);
             if (doc.Root == null) return "";
+
+            SourceAttachments = doc.Descendants(_ns + "InsertedFile").Count();
+            SourceImages = doc.Descendants(_ns + "Image").Count();
 
             // Export original attachments first so printout images can be suppressed only
             // when the corresponding original file was actually copied successfully.
@@ -514,6 +532,7 @@ namespace OneNoteMarkdownExporter.Services
                     !string.IsNullOrWhiteSpace(xpsFileIndex) &&
                     _exportedPrintoutIndexes.Contains(xpsFileIndex))
                 {
+                    SuppressedPrintoutImages++;
                     return "";
                 }
 
@@ -539,6 +558,8 @@ namespace OneNoteMarkdownExporter.Services
                 // If we still don't have data, return a placeholder
                 if (string.IsNullOrWhiteSpace(base64Data))
                 {
+                    FailedImageExports++;
+
                     // Log additional info for debugging
                     var callbackId = image.Attribute("callbackID")?.Value;
                     var objectId = image.Attribute("objectID")?.Value;
@@ -576,6 +597,7 @@ namespace OneNoteMarkdownExporter.Services
                 // Decode and save
                 var imageBytes = System.Convert.FromBase64String(base64Data);
                 File.WriteAllBytes(filePath, imageBytes);
+                SuccessfulImageExports++;
 
                 // Return HTML img tag
                 var relativePath = $"{_relativeAssetsPath}/{fileName}".Replace("\\", "/");
@@ -583,6 +605,7 @@ namespace OneNoteMarkdownExporter.Services
             }
             catch (Exception ex)
             {
+                FailedImageExports++;
                 return $"<p><em>[Image export failed: {System.Net.WebUtility.HtmlEncode(ex.Message)}]</em></p>";
             }
         }
@@ -675,6 +698,7 @@ namespace OneNoteMarkdownExporter.Services
 
                 if (string.IsNullOrWhiteSpace(sourcePath))
                 {
+                    FailedAttachmentExports++;
                     var details = $"preferredName={preferredName ?? "none"}, pathCache={pathCache ?? "none"}, pathSource={pathSource ?? "none"}";
                     return ($"<p><strong>[ATTACHMENT EXPORT FAILED: original file not available locally. {System.Net.WebUtility.HtmlEncode(details)}]</strong></p>", false);
                 }
@@ -689,6 +713,7 @@ namespace OneNoteMarkdownExporter.Services
                 var filePath = Path.Combine(_assetsFolder, fileName);
 
                 File.Copy(sourcePath, filePath, true);
+                SuccessfulAttachmentExports++;
 
                 var relativePath = $"{_relativeAssetsPath}/{fileName}".Replace("\\", "/");
                 var encodedHref = System.Net.WebUtility.HtmlEncode(relativePath);
@@ -697,6 +722,7 @@ namespace OneNoteMarkdownExporter.Services
             }
             catch (Exception ex)
             {
+                FailedAttachmentExports++;
                 return ($"<p><strong>[ATTACHMENT EXPORT FAILED: {System.Net.WebUtility.HtmlEncode(ex.Message)}]</strong></p>", false);
             }
         }
