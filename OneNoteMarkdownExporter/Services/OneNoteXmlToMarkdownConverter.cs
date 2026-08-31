@@ -45,6 +45,8 @@ namespace OneNoteMarkdownExporter.Services
         public int SuccessfulImageExports { get; private set; }
         public int FailedImageExports { get; private set; }
         public int SuppressedPrintoutImages { get; private set; }
+        public IReadOnlyList<string> AttachmentFailureDiagnostics => _attachmentFailureDiagnostics;
+        private readonly List<string> _attachmentFailureDiagnostics = new();
 
         public OneNoteXmlToMarkdownConverter()
         {
@@ -78,6 +80,7 @@ namespace OneNoteMarkdownExporter.Services
             SuccessfulImageExports = 0;
             FailedImageExports = 0;
             SuppressedPrintoutImages = 0;
+            _attachmentFailureDiagnostics.Clear();
 
             var doc = XDocument.Parse(pageXml);
             if (doc.Root == null) return "";
@@ -699,6 +702,17 @@ namespace OneNoteMarkdownExporter.Services
                 if (string.IsNullOrWhiteSpace(sourcePath))
                 {
                     FailedAttachmentExports++;
+
+                    var normalizedPathCache = NormalizeDiagnosticPath(pathCache);
+                    var normalizedPathSource = NormalizeDiagnosticPath(pathSource);
+                    var pathCacheExists = PathExistsForDiagnostic(normalizedPathCache);
+                    var pathSourceExists = PathExistsForDiagnostic(normalizedPathSource);
+
+                    _attachmentFailureDiagnostics.Add(
+                        $"preferredName='{preferredName ?? "none"}'; " +
+                        $"pathCache='{normalizedPathCache ?? "none"}'; pathCacheExists={pathCacheExists}; " +
+                        $"pathSource='{normalizedPathSource ?? "none"}'; pathSourceExists={pathSourceExists}");
+
                     var details = $"preferredName={preferredName ?? "none"}, pathCache={pathCache ?? "none"}, pathSource={pathSource ?? "none"}";
                     return ($"<p><strong>[ATTACHMENT EXPORT FAILED: original file not available locally. {System.Net.WebUtility.HtmlEncode(details)}]</strong></p>", false);
                 }
@@ -723,7 +737,42 @@ namespace OneNoteMarkdownExporter.Services
             catch (Exception ex)
             {
                 FailedAttachmentExports++;
+                _attachmentFailureDiagnostics.Add($"exception='{ex.GetType().Name}: {ex.Message}'");
                 return ($"<p><strong>[ATTACHMENT EXPORT FAILED: {System.Net.WebUtility.HtmlEncode(ex.Message)}]</strong></p>", false);
+            }
+        }
+
+        private static string? NormalizeDiagnosticPath(string? candidatePath)
+        {
+            if (string.IsNullOrWhiteSpace(candidatePath))
+            {
+                return null;
+            }
+
+            try
+            {
+                return Environment.ExpandEnvironmentVariables(candidatePath.Trim().Trim('"'));
+            }
+            catch
+            {
+                return candidatePath;
+            }
+        }
+
+        private static bool PathExistsForDiagnostic(string? candidatePath)
+        {
+            if (string.IsNullOrWhiteSpace(candidatePath))
+            {
+                return false;
+            }
+
+            try
+            {
+                return File.Exists(candidatePath);
+            }
+            catch
+            {
+                return false;
             }
         }
 
