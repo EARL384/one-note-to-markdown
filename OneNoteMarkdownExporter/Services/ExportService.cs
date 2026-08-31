@@ -119,6 +119,19 @@ namespace OneNoteMarkdownExporter.Services
             @"<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?Image\b",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+        // A successful attachment export is represented by a Markdown link whose
+        // generated target name contains "_attachment_". The converter emits that
+        // link only after File.Copy has completed successfully, so this gives us a
+        // write-success signal without scanning the (possibly network-based) assets
+        // directory for every page.
+        private static readonly Regex MarkdownAttachmentLinkRegex = new(
+            @"\[[^\]]*\]\([^\r\n)]*_attachment_[^\r\n)]*\)",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex AttachmentExportFailureRegex = new(
+            @"\[ATTACHMENT EXPORT FAILED:",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
         private static readonly Regex ImageExportFailureRegex = new(
             @"\[(?:Image - no embedded data, could not fetch binary content\.|Image export failed:)",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -1290,10 +1303,9 @@ namespace OneNoteMarkdownExporter.Services
                 var pageXml = _oneNoteService.GetPageContent(page.Id);
 
                 // Record how many attachments and images OneNote exposes on this page.
-                // For attachments, completeness is verified against files physically
-                // written by this conversion run. This avoids false positives from
-                // converter placeholder text and also avoids counting stale files from
-                // an earlier export as successful.
+                // The converter already emits explicit failure placeholders when an
+                // attachment or image cannot be exported, so these counts can be
+                // reconciled after conversion without changing the converter itself.
                 var sourceAttachmentsOnPage = OneNoteInsertedFileElementRegex.Matches(pageXml).Count;
                 var sourceImagesOnPage = OneNoteImageElementRegex.Matches(pageXml).Count;
 
@@ -1304,20 +1316,13 @@ namespace OneNoteMarkdownExporter.Services
                 // Use the final collision-safe Markdown filename stem as the asset prefix so
                 // duplicate page titles cannot overwrite each other's images or attachments.
                 var assetPagePrefix = Path.GetFileNameWithoutExtension(finalMdPath);
-                var assetSnapshotBeforeConversion = CapturePageAssetSnapshot(
-                    pageContext.AssetsFolderPath,
-                    assetPagePrefix);
-
                 var markdown = _xmlConverter.Convert(pageXml, pageContext.AssetsFolderPath, pageContext.RelativeAssetsPath, binaryFetcher, assetPagePrefix);
 
                 var completenessOnPage = UpdateCompletenessStatistics(
                     result,
                     sourceAttachmentsOnPage,
                     sourceImagesOnPage,
-                    markdown,
-                    pageContext.AssetsFolderPath,
-                    assetPagePrefix,
-                    assetSnapshotBeforeConversion);
+                    markdown);
 
                 if (completenessOnPage.FailedAttachments > 0 || completenessOnPage.FailedImages > 0)
                 {
@@ -1398,44 +1403,47 @@ namespace OneNoteMarkdownExporter.Services
             ExportResult result,
             int sourceAttachmentsOnPage,
             int sourceImagesOnPage,
-            string markdown,
-            string assetsFolderPath,
-            string assetPagePrefix,
-            Dictionary<string, (long Length, DateTime LastWriteUtc)> assetSnapshotBeforeConversion)
+            string markdown)
         {
-            var touchedAssetFiles = GetTouchedPageAssetFiles(
-                assetsFolderPath,
-                assetPagePrefix,
-                assetSnapshotBeforeConversion);
-
-            // The converter uses the collision-safe page prefix for generated asset names.
-            // Original file attachments contain "_attachment_" in that generated name.
-            // Count only files that were created or overwritten by THIS page conversion,
-            // so an old file from a previous run cannot hide a current export failure.
-            var physicalAttachmentFilesOnPage = touchedAssetFiles.Count(IsAttachmentAssetFile);
-            var physicalImageFilesOnPage = Math.Max(0, touchedAssetFiles.Count - physicalAttachmentFilesOnPage);
+            // FAST COMPLETENESS CHECK:
+            // Do not enumerate or stat files in the assets directory here. On a NAS that
+            // turns a cheap per-page diagnostic into thousands of network round-trips.
+            // Instead, use the converter's output as the success signal:
+            //   * attachment link -> File.Copy completed successfully
+            //   * Markdown image -> File.WriteAllBytes completed successfully
+            // Failure placeholders remain useful as a defensive cross-check.
+            var attachmentLinksOnPage = MarkdownAttachmentLinkRegex.Matches(markdown).Count;
+            var explicitAttachmentFailuresOnPage = AttachmentExportFailureRegex.Matches(markdown).Count;
+            var explicitImageFailuresOnPage = ImageExportFailureRegex.Matches(markdown).Count;
+            var markdownImagesOnPage = MarkdownImageRegex.Matches(markdown).Count;
 
             var exportedAttachmentsOnPage = Math.Min(
                 sourceAttachmentsOnPage,
-                physicalAttachmentFilesOnPage);
-            var failedAttachmentsOnPage = Math.Max(
+                attachmentLinksOnPage);
+
+            var inferredAttachmentFailuresOnPage = Math.Max(
                 0,
                 sourceAttachmentsOnPage - exportedAttachmentsOnPage);
 
+            var failedAttachmentsOnPage = Math.Min(
+                sourceAttachmentsOnPage,
+                Math.Max(inferredAttachmentFailuresOnPage, explicitAttachmentFailuresOnPage));
+
             var exportedImagesOnPage = Math.Min(
                 sourceImagesOnPage,
-                physicalImageFilesOnPage);
+                markdownImagesOnPage);
 
-            // The converter intentionally suppresses PDF printout images when the original
-            // PDF is exported. Therefore missing physical image files are not automatically
-            // failures. Only explicit converter image-failure markers count as failures;
-            // the remaining non-exported images are reported as suppressed/not exported.
+            // Printout images belonging to a successfully exported original document are
+            // intentionally suppressed by the converter. Therefore only explicit image
+            // failure placeholders count as failures; the remainder is reported separately.
             var possibleMissingImagesOnPage = Math.Max(
                 0,
                 sourceImagesOnPage - exportedImagesOnPage);
+
             var failedImagesOnPage = Math.Min(
-                ImageExportFailureRegex.Matches(markdown).Count,
+                explicitImageFailuresOnPage,
                 possibleMissingImagesOnPage);
+
             var suppressedOrNotExportedImagesOnPage = Math.Max(
                 0,
                 sourceImagesOnPage - exportedImagesOnPage - failedImagesOnPage);
@@ -1451,91 +1459,6 @@ namespace OneNoteMarkdownExporter.Services
             return (failedAttachmentsOnPage, failedImagesOnPage);
         }
 
-        private static Dictionary<string, (long Length, DateTime LastWriteUtc)> CapturePageAssetSnapshot(
-            string assetsFolderPath,
-            string assetPagePrefix)
-        {
-            var snapshot = new Dictionary<string, (long Length, DateTime LastWriteUtc)>(
-                StringComparer.OrdinalIgnoreCase);
-
-            foreach (var filePath in GetPhysicalPageAssetFiles(assetsFolderPath, assetPagePrefix))
-            {
-                try
-                {
-                    var info = new FileInfo(filePath);
-                    snapshot[filePath] = (info.Length, info.LastWriteTimeUtc);
-                }
-                catch
-                {
-                    // Completeness diagnostics must never make the export fail.
-                }
-            }
-
-            return snapshot;
-        }
-
-        private static List<string> GetTouchedPageAssetFiles(
-            string assetsFolderPath,
-            string assetPagePrefix,
-            Dictionary<string, (long Length, DateTime LastWriteUtc)> snapshotBeforeConversion)
-        {
-            var touched = new List<string>();
-
-            foreach (var filePath in GetPhysicalPageAssetFiles(assetsFolderPath, assetPagePrefix))
-            {
-                try
-                {
-                    var info = new FileInfo(filePath);
-                    if (!snapshotBeforeConversion.TryGetValue(filePath, out var before)
-                        || before.Length != info.Length
-                        || before.LastWriteUtc != info.LastWriteTimeUtc)
-                    {
-                        touched.Add(filePath);
-                    }
-                }
-                catch
-                {
-                    // Treat an unreadable file as not physically verified. The source count
-                    // will then surface it as a completeness failure instead of aborting export.
-                }
-            }
-
-            return touched;
-        }
-
-        private static IEnumerable<string> GetPhysicalPageAssetFiles(
-            string assetsFolderPath,
-            string assetPagePrefix)
-        {
-            if (!Directory.Exists(assetsFolderPath))
-            {
-                return Enumerable.Empty<string>();
-            }
-
-            try
-            {
-                var expectedPrefix = assetPagePrefix + "_";
-                return Directory
-                    .EnumerateFiles(assetsFolderPath, "*", SearchOption.TopDirectoryOnly)
-                    .Where(path => Path.GetFileName(path).StartsWith(
-                        expectedPrefix,
-                        StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-            }
-            catch
-            {
-                // Diagnostics are deliberately non-blocking.
-                return Enumerable.Empty<string>();
-            }
-        }
-
-        private static bool IsAttachmentAssetFile(string filePath)
-        {
-            return Path.GetFileName(filePath).IndexOf(
-                "_attachment_",
-                StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-
         private static void ReportCompletenessStatistics(
             IProgress<ExportProgressUpdate>? progress,
             ExportResult result)
@@ -1543,13 +1466,13 @@ namespace OneNoteMarkdownExporter.Services
             Report(
                 progress,
                 ExportProgressKind.Message,
-                $"COMPLETENESS: Attachments: found {result.SourceAttachments}, physically verified {result.ExportedAttachments}, failed {result.FailedAttachments}.",
+                $"COMPLETENESS: Attachments: found {result.SourceAttachments}, converter-confirmed {result.ExportedAttachments}, failed {result.FailedAttachments}.",
                 result);
 
             Report(
                 progress,
                 ExportProgressKind.Message,
-                $"COMPLETENESS: Images: found {result.SourceImages}, physically verified {result.ExportedImages}, failed {result.FailedImages}, suppressed/not exported {result.SuppressedOrNotExportedImages}.",
+                $"COMPLETENESS: Images: found {result.SourceImages}, converter-confirmed {result.ExportedImages}, failed {result.FailedImages}, suppressed/not exported {result.SuppressedOrNotExportedImages}.",
                 result);
 
             if (result.FailedAttachments == 0 && result.FailedImages == 0)
