@@ -403,7 +403,23 @@ namespace OneNoteMarkdownExporter
                 Log("Markdown linting enabled (markdownlint-cli2)");
             }
 
-            var progress = new Progress<ExportProgressUpdate>(HandleExportProgress);
+            // Keep an independent copy of the latest page counters reported by the
+            // export service. If an unexpected top-level exception occurs after many pages
+            // have already been exported, the UI must not fall back to "0 of N".
+            var latestExportedPages = 0;
+            var latestFailedPages = 0;
+
+            var progress = new Progress<ExportProgressUpdate>(update =>
+            {
+                if (update.Kind == ExportProgressKind.PageExported
+                    || update.Kind == ExportProgressKind.PageFailed)
+                {
+                    latestExportedPages = Math.Max(latestExportedPages, update.ExportedPages);
+                    latestFailedPages = Math.Max(latestFailedPages, update.FailedPages);
+                }
+
+                HandleExportProgress(update);
+            });
 
             try
             {
@@ -411,9 +427,33 @@ namespace OneNoteMarkdownExporter
             }
             catch (Exception ex)
             {
-                result = new ExportResult { Error = ex.Message, TotalPages = totalPages };
+                result = new ExportResult
+                {
+                    Error = ex.Message,
+                    TotalPages = totalPages,
+                    ExportedPages = latestExportedPages,
+                    FailedPages = latestFailedPages
+                };
                 LogGeneralFailure("Export", ex);
                 generalFailureLogged = true;
+            }
+
+            // ExportService normally returns its own counters. If a higher-level failure
+            // caused it to return an incomplete result, preserve the page counters the GUI
+            // already received through progress updates.
+            if (result.ExportedPages < latestExportedPages)
+            {
+                result.ExportedPages = latestExportedPages;
+            }
+
+            if (result.FailedPages < latestFailedPages)
+            {
+                result.FailedPages = latestFailedPages;
+            }
+
+            if (result.TotalPages <= 0)
+            {
+                result.TotalPages = totalPages;
             }
 
             if (!generalFailureLogged && !string.IsNullOrEmpty(result.Error) && result.Failures.Count == 0)
