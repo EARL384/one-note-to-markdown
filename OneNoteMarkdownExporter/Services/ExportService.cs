@@ -171,50 +171,170 @@ namespace OneNoteMarkdownExporter.Services
             public Dictionary<string, string> Entries { get; set; } = new();
         }
 
-        // Writes every export progress message to a per-run log file while forwarding
-        // the same progress update to the existing GUI/CLI progress reporter.
-        // The log is diagnostic only and does not affect export behavior.
+        // Writes every export progress message to a LOCAL per-run log file while
+        // forwarding the same update to the existing GUI/CLI progress reporter.
+        //
+        // Important design rule:
+        // Logging is diagnostic only and must NEVER abort an export. The live log is kept
+        // below %LOCALAPPDATA%\OneNoteMarkdownExporter\logs so a short SMB/NAS outage on
+        // the export target cannot terminate a long-running export. When the run ends, the
+        // complete local log is copied to <OutputPath>\_export_logs if that location is
+        // available. A failed archive copy is reported as a warning but is never thrown.
         private sealed class ExportRunFileProgress : IProgress<ExportProgressUpdate>, IDisposable
         {
             private readonly IProgress<ExportProgressUpdate>? _innerProgress;
-            private readonly StreamWriter _writer;
             private readonly object _sync = new();
+            private StreamWriter? _writer;
+            private bool _localLoggingDisabled;
+            private bool _localLoggingWarningReported;
+            private bool _disposed;
 
             public ExportRunFileProgress(
                 IProgress<ExportProgressUpdate>? innerProgress,
-                string logFilePath)
+                string localLogFilePath,
+                string archiveLogFilePath)
             {
                 _innerProgress = innerProgress;
-                LogFilePath = logFilePath;
-                _writer = new StreamWriter(logFilePath, append: false)
+                LocalLogFilePath = localLogFilePath;
+                ArchiveLogFilePath = archiveLogFilePath;
+
+                _writer = new StreamWriter(localLogFilePath, append: false)
                 {
                     AutoFlush = true
                 };
             }
 
-            public string LogFilePath { get; }
+            public string LocalLogFilePath { get; }
+            public string ArchiveLogFilePath { get; }
 
             public void Report(ExportProgressUpdate value)
             {
-                lock (_sync)
-                {
-                    _writer.WriteLine($"{DateTime.Now:HH:mm:ss}: {value.Message}");
+                // GUI/CLI progress must continue even if file logging fails.
+                TryWriteToLocalLog(value);
+                _innerProgress?.Report(value);
+            }
 
-                    if (value.Kind == ExportProgressKind.PageFailed
-                        && !string.IsNullOrWhiteSpace(value.FailureDetails))
-                    {
-                        _writer.WriteLine(value.FailureDetails);
-                    }
+            private void TryWriteToLocalLog(ExportProgressUpdate value)
+            {
+                if (_localLoggingDisabled)
+                {
+                    return;
                 }
 
-                _innerProgress?.Report(value);
+                try
+                {
+                    lock (_sync)
+                    {
+                        if (_writer == null)
+                        {
+                            return;
+                        }
+
+                        _writer.WriteLine($"{DateTime.Now:HH:mm:ss}: {value.Message}");
+
+                        if (value.Kind == ExportProgressKind.PageFailed
+                            && !string.IsNullOrWhiteSpace(value.FailureDetails))
+                        {
+                            _writer.WriteLine(value.FailureDetails);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DisableLocalLogging(ex);
+                }
+            }
+
+            private void DisableLocalLogging(Exception ex)
+            {
+                if (_localLoggingDisabled)
+                {
+                    return;
+                }
+
+                _localLoggingDisabled = true;
+
+                try
+                {
+                    lock (_sync)
+                    {
+                        _writer?.Dispose();
+                        _writer = null;
+                    }
+                }
+                catch
+                {
+                    // Never allow diagnostic logging cleanup to affect the export.
+                }
+
+                if (!_localLoggingWarningReported)
+                {
+                    _localLoggingWarningReported = true;
+                    _innerProgress?.Report(new ExportProgressUpdate
+                    {
+                        Kind = ExportProgressKind.Warning,
+                        Message =
+                            $"Warning: Local export log became unavailable. Export will continue without file logging. " +
+                            $"Log path: {LocalLogFilePath}. Error: {ex.Message}"
+                    });
+                }
             }
 
             public void Dispose()
             {
-                lock (_sync)
+                if (_disposed)
                 {
-                    _writer.Dispose();
+                    return;
+                }
+
+                _disposed = true;
+
+                // First close/flush the local writer. Any failure here is diagnostic only.
+                try
+                {
+                    lock (_sync)
+                    {
+                        _writer?.Dispose();
+                        _writer = null;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DisableLocalLogging(ex);
+                }
+
+                // Then archive the complete LOCAL log to the export destination. This is the
+                // only network/NAS operation performed by the logger during a normal run.
+                if (_localLoggingDisabled || !File.Exists(LocalLogFilePath))
+                {
+                    return;
+                }
+
+                try
+                {
+                    var archiveDirectory = Path.GetDirectoryName(ArchiveLogFilePath);
+                    if (!string.IsNullOrWhiteSpace(archiveDirectory))
+                    {
+                        Directory.CreateDirectory(archiveDirectory);
+                    }
+
+                    File.Copy(LocalLogFilePath, ArchiveLogFilePath, overwrite: true);
+
+                    _innerProgress?.Report(new ExportProgressUpdate
+                    {
+                        Kind = ExportProgressKind.Message,
+                        Message = $"Export log archived to: {ArchiveLogFilePath}"
+                    });
+                }
+                catch (Exception ex)
+                {
+                    _innerProgress?.Report(new ExportProgressUpdate
+                    {
+                        Kind = ExportProgressKind.Warning,
+                        Message =
+                            $"Warning: Could not copy the completed export log to the export destination. " +
+                            $"The full local log is still available at: {LocalLogFilePath}. Error: {ex.Message}"
+                    });
                 }
             }
         }
@@ -355,19 +475,28 @@ namespace OneNoteMarkdownExporter.Services
         {
             try
             {
-                var logsDirectory = Path.Combine(options.OutputPath, "_export_logs");
-                Directory.CreateDirectory(logsDirectory);
-
                 var fileName = $"OneNoteMarkdownExport_{DateTime.Now:yyyy-MM-dd_HH-mm-ss-fff}.log";
-                var logFilePath = Path.Combine(logsDirectory, fileName);
-                return new ExportRunFileProgress(progress, logFilePath);
+
+                var localLogsDirectory = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "OneNoteMarkdownExporter",
+                    "logs");
+                Directory.CreateDirectory(localLogsDirectory);
+
+                var localLogFilePath = Path.Combine(localLogsDirectory, fileName);
+                var archiveLogFilePath = Path.Combine(options.OutputPath, "_export_logs", fileName);
+
+                return new ExportRunFileProgress(
+                    progress,
+                    localLogFilePath,
+                    archiveLogFilePath);
             }
             catch (Exception ex)
             {
                 Report(
                     progress,
                     ExportProgressKind.Warning,
-                    $"Warning: Could not create export log file. Export will continue without a file log: {ex.Message}");
+                    $"Warning: Could not create local export log file. Export will continue without a file log: {ex.Message}");
                 return null;
             }
         }
@@ -382,7 +511,8 @@ namespace OneNoteMarkdownExporter.Services
                 return;
             }
 
-            Report(progress, ExportProgressKind.Message, $"Export log file: {fileProgress.LogFilePath}");
+            Report(progress, ExportProgressKind.Message, $"Export log file (local): {fileProgress.LocalLogFilePath}");
+            Report(progress, ExportProgressKind.Message, $"Export log archive target: {fileProgress.ArchiveLogFilePath}");
             Report(progress, ExportProgressKind.Message, $"Output directory: {options.OutputPath}");
         }
 
