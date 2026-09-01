@@ -33,6 +33,7 @@ namespace OneNoteMarkdownExporter.Services
         private int _attachmentCounter = 0;
         private readonly Dictionary<XElement, string> _attachmentHtmlCache = new();
         private readonly HashSet<string> _exportedPrintoutIndexes = new(StringComparer.Ordinal);
+        private readonly HashSet<XElement> _processedImageElements = new();
         private string _literalAnglePlaceholderPrefix = "";
         private int _literalAnglePlaceholderCounter = 0;
         private readonly Dictionary<string, string> _literalAnglePlaceholders = new();
@@ -45,6 +46,7 @@ namespace OneNoteMarkdownExporter.Services
         public int SuccessfulImageExports { get; private set; }
         public int FailedImageExports { get; private set; }
         public int SuppressedPrintoutImages { get; private set; }
+        public int UnprocessedImageObjects { get; private set; }
         public IReadOnlyList<string> AttachmentFailureDiagnostics => _attachmentFailureDiagnostics;
         private readonly List<string> _attachmentFailureDiagnostics = new();
 
@@ -69,6 +71,7 @@ namespace OneNoteMarkdownExporter.Services
             _attachmentCounter = 0;
             _attachmentHtmlCache.Clear();
             _exportedPrintoutIndexes.Clear();
+            _processedImageElements.Clear();
             _literalAnglePlaceholderPrefix = $"ONENOTELITERAL{Guid.NewGuid():N}";
             _literalAnglePlaceholderCounter = 0;
             _literalAnglePlaceholders.Clear();
@@ -80,6 +83,7 @@ namespace OneNoteMarkdownExporter.Services
             SuccessfulImageExports = 0;
             FailedImageExports = 0;
             SuppressedPrintoutImages = 0;
+            UnprocessedImageObjects = 0;
             _attachmentFailureDiagnostics.Clear();
 
             var doc = XDocument.Parse(pageXml);
@@ -126,6 +130,12 @@ namespace OneNoteMarkdownExporter.Services
             }
 
             htmlBuilder.AppendLine("</body></html>");
+
+            // SourceImages counts every OneNote <Image> object in the page XML.
+            // Track how many of those objects the normal conversion traversal actually reached.
+            // Any remainder is reported explicitly instead of silently disappearing into the
+            // completeness arithmetic.
+            UnprocessedImageObjects = Math.Max(0, SourceImages - _processedImageElements.Count);
 
             // Get the HTML and normalize anchor tags BEFORE ReverseMarkdown processing
             var html = htmlBuilder.ToString();
@@ -520,6 +530,8 @@ namespace OneNoteMarkdownExporter.Services
 
         private string ProcessImageToHtml(XElement image)
         {
+            _processedImageElements.Add(image);
+
             try
             {
                 // OneNote printouts are page images generated from an inserted document.
@@ -892,18 +904,64 @@ namespace OneNoteMarkdownExporter.Services
             var parts = new List<string>();
             foreach (var oe in oeChildren.Elements(_ns + "OE"))
             {
-                var text = new StringBuilder();
-                foreach (var t in oe.Elements(_ns + "T"))
+                var content = GetTableCellOEContent(oe);
+                if (!string.IsNullOrWhiteSpace(content))
                 {
-                    text.Append(ProcessTextElement(t));
-                }
-                if (text.Length > 0)
-                {
-                    parts.Add(text.ToString());
+                    parts.Add(content);
                 }
             }
 
             return string.Join("<br/>", parts);
+        }
+
+        /// <summary>
+        /// Builds the content of an OE that lives inside a OneNote table cell.
+        /// The previous implementation handled only text here, which meant images,
+        /// attachments and nested tables/children inside table cells were counted in
+        /// the source XML but never reached the normal export routines.
+        /// </summary>
+        private string GetTableCellOEContent(XElement oe)
+        {
+            var content = new StringBuilder();
+
+            foreach (var t in oe.Elements(_ns + "T"))
+            {
+                content.Append(ProcessTextElement(t));
+            }
+
+            foreach (var table in oe.Elements(_ns + "Table"))
+            {
+                content.Append(ProcessTable(table));
+            }
+
+            foreach (var image in oe.Elements(_ns + "Image"))
+            {
+                content.Append(ProcessImageToHtml(image));
+            }
+
+            foreach (var insertedFile in oe.Elements(_ns + "InsertedFile"))
+            {
+                content.Append(ProcessInsertedFileToHtml(insertedFile));
+            }
+
+            var nestedChildren = oe.Element(_ns + "OEChildren");
+            if (nestedChildren != null)
+            {
+                foreach (var child in nestedChildren.Elements(_ns + "OE"))
+                {
+                    var childContent = GetTableCellOEContent(child);
+                    if (!string.IsNullOrWhiteSpace(childContent))
+                    {
+                        if (content.Length > 0)
+                        {
+                            content.Append("<br/>");
+                        }
+                        content.Append(childContent);
+                    }
+                }
+            }
+
+            return content.ToString();
         }
 
         private string GetPlainText(XElement? oe)
