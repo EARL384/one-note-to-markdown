@@ -151,7 +151,7 @@ namespace OneNoteMarkdownExporter.Services
             foreach (var image in unprocessedImages)
             {
                 var callbackId = image.Attribute("callbackID")?.Value ?? "none";
-                var format = image.Attribute("format")?.Value ?? "none";
+                var diagnosticFormat = image.Attribute("format")?.Value ?? "none";
                 var isPrintOut = image.Attribute("isPrintOut")?.Value ?? "none";
                 var xpsFileIndex = image.Attribute("xpsFileIndex")?.Value ?? "none";
                 var parentName = image.Parent?.Name.LocalName ?? "none";
@@ -164,7 +164,7 @@ namespace OneNoteMarkdownExporter.Services
                         .Select(element => element.Name.LocalName));
 
                 _unprocessedImageDiagnostics.Add(
-                    $"callbackID='{callbackId}'; format='{format}'; isPrintOut='{isPrintOut}'; " +
+                    $"callbackID='{callbackId}'; format='{diagnosticFormat}'; isPrintOut='{isPrintOut}'; " +
                     $"xpsFileIndex='{xpsFileIndex}'; parent='{parentName}'; grandParent='{grandParentName}'; " +
                     $"ancestorPath='{ancestorPath}'");
             }
@@ -609,7 +609,7 @@ namespace OneNoteMarkdownExporter.Services
 
                     var callbackId = image.Attribute("callbackID")?.Value;
                     var objectId = image.Attribute("objectID")?.Value;
-                    var format = image.Attribute("format")?.Value ?? "none";
+                    var diagnosticFormat = image.Attribute("format")?.Value ?? "none";
                     var isPrintOutValue = image.Attribute("isPrintOut")?.Value ?? "none";
                     var xpsFileIndexValue = image.Attribute("xpsFileIndex")?.Value ?? "none";
                     var parentName = image.Parent?.Name.LocalName ?? "none";
@@ -621,7 +621,7 @@ namespace OneNoteMarkdownExporter.Services
 
                     _imageFailureDiagnostics.Add(
                         $"reason='no binary content'; callbackID='{callbackId ?? "none"}'; " +
-                        $"objectID='{objectId ?? "none"}'; format='{format}'; isPrintOut='{isPrintOutValue}'; " +
+                        $"objectID='{objectId ?? "none"}'; format='{diagnosticFormat}'; isPrintOut='{isPrintOutValue}'; " +
                         $"xpsFileIndex='{xpsFileIndexValue}'; parent='{parentName}'; ancestorPath='{ancestorPath}'");
 
                     var info = $"callbackID={callbackId ?? "none"}, objectID={objectId ?? "none"}";
@@ -670,7 +670,7 @@ namespace OneNoteMarkdownExporter.Services
 
                 var callbackId = image.Attribute("callbackID")?.Value ?? "none";
                 var objectId = image.Attribute("objectID")?.Value ?? "none";
-                var format = image.Attribute("format")?.Value ?? "none";
+                var diagnosticFormat = image.Attribute("format")?.Value ?? "none";
                 var isPrintOutValue = image.Attribute("isPrintOut")?.Value ?? "none";
                 var xpsFileIndexValue = image.Attribute("xpsFileIndex")?.Value ?? "none";
                 var parentName = image.Parent?.Name.LocalName ?? "none";
@@ -682,7 +682,7 @@ namespace OneNoteMarkdownExporter.Services
 
                 _imageFailureDiagnostics.Add(
                     $"reason='exception'; exception='{ex.GetType().Name}: {ex.Message}'; " +
-                    $"callbackID='{callbackId}'; objectID='{objectId}'; format='{format}'; " +
+                    $"callbackID='{callbackId}'; objectID='{objectId}'; format='{diagnosticFormat}'; " +
                     $"isPrintOut='{isPrintOutValue}'; xpsFileIndex='{xpsFileIndexValue}'; " +
                     $"parent='{parentName}'; ancestorPath='{ancestorPath}'");
 
