@@ -303,9 +303,11 @@ namespace OneNoteMarkdownExporter.Services
             if (oe.Elements(_ns + "Table").Any())
                 return true;
             
-            // Check nested children
-            var nestedChildren = oe.Element(_ns + "OEChildren");
-            if (nestedChildren != null && nestedChildren.Elements(_ns + "OE").Any())
+            // Check ALL nested OEChildren containers.
+            // Some OneNote pages contain more than one OEChildren element under the
+            // same OE. Using oe.Element(...) only inspects the first one and can hide
+            // otherwise valid images/attachments in later containers.
+            foreach (var nestedChildren in oe.Elements(_ns + "OEChildren"))
             {
                 foreach (var child in nestedChildren.Elements(_ns + "OE"))
                 {
@@ -368,19 +370,14 @@ namespace OneNoteMarkdownExporter.Services
                 }
             }
 
-            // Process nested children
-            var nestedChildren = oe.Element(_ns + "OEChildren");
-            if (nestedChildren != null)
+            // Process ALL nested OEChildren containers.
+            // OneNote can emit multiple OEChildren siblings under one OE. The previous
+            // oe.Element(...) call only processed the first container, which is why
+            // valid images on pages such as "Fundraising und Engagement" could remain
+            // counted but unprocessed.
+            foreach (var nestedChildren in oe.Elements(_ns + "OEChildren"))
             {
-                if (isListItem || inList)
-                {
-                    // Nested content within list item
-                    ProcessOEChildren(nestedChildren, html);
-                }
-                else
-                {
-                    ProcessOEChildren(nestedChildren, html);
-                }
+                ProcessOEChildren(nestedChildren, html);
             }
 
             if ((hasContent || content.Length > 0) && (isListItem || inList))
