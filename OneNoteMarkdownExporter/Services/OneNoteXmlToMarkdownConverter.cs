@@ -927,70 +927,70 @@ namespace OneNoteMarkdownExporter.Services
 
         private string GetCellContent(XElement cell)
         {
-            var oeChildren = cell.Element(_ns + "OEChildren");
-            if (oeChildren == null) return "";
-
-            var parts = new List<string>();
-            foreach (var oe in oeChildren.Elements(_ns + "OE"))
-            {
-                var content = GetTableCellOEContent(oe);
-                if (!string.IsNullOrWhiteSpace(content))
-                {
-                    parts.Add(content);
-                }
-            }
-
-            return string.Join("<br/>", parts);
+            // OneNote web clips can contain deeply nested wrapper structures inside a table
+            // cell (OEChildren/OE/.../Table/.../Cell/OEChildren/OE/Image). Walk the cell
+            // recursively and stop recursion at content elements that already know how to
+            // process their own descendants (especially Table). This avoids both missed
+            // images and duplicate exports.
+            return ProcessTableCellContainer(cell);
         }
 
-        /// <summary>
-        /// Builds the content of an OE that lives inside a OneNote table cell.
-        /// The previous implementation handled only text here, which meant images,
-        /// attachments and nested tables/children inside table cells were counted in
-        /// the source XML but never reached the normal export routines.
-        /// </summary>
-        private string GetTableCellOEContent(XElement oe)
+        private string ProcessTableCellContainer(XElement container)
         {
             var content = new StringBuilder();
+            var firstLogicalItem = true;
 
-            foreach (var t in oe.Elements(_ns + "T"))
+            foreach (var child in container.Elements())
             {
-                content.Append(ProcessTextElement(t));
-            }
-
-            foreach (var table in oe.Elements(_ns + "Table"))
-            {
-                content.Append(ProcessTable(table));
-            }
-
-            foreach (var image in oe.Elements(_ns + "Image"))
-            {
-                content.Append(ProcessImageToHtml(image));
-            }
-
-            foreach (var insertedFile in oe.Elements(_ns + "InsertedFile"))
-            {
-                content.Append(ProcessInsertedFileToHtml(insertedFile));
-            }
-
-            var nestedChildren = oe.Element(_ns + "OEChildren");
-            if (nestedChildren != null)
-            {
-                foreach (var child in nestedChildren.Elements(_ns + "OE"))
+                var childContent = ProcessTableCellNode(child);
+                if (string.IsNullOrWhiteSpace(childContent))
                 {
-                    var childContent = GetTableCellOEContent(child);
-                    if (!string.IsNullOrWhiteSpace(childContent))
-                    {
-                        if (content.Length > 0)
-                        {
-                            content.Append("<br/>");
-                        }
-                        content.Append(childContent);
-                    }
+                    continue;
                 }
+
+                // OE elements normally represent separate logical lines/blocks in OneNote.
+                // Preserve a lightweight separator without affecting nested table markup.
+                if (!firstLogicalItem && child.Name == _ns + "OE")
+                {
+                    content.Append("<br/>");
+                }
+
+                content.Append(childContent);
+                firstLogicalItem = false;
             }
 
             return content.ToString();
+        }
+
+        private string ProcessTableCellNode(XElement element)
+        {
+            if (element.Name == _ns + "T")
+            {
+                return ProcessTextElement(element);
+            }
+
+            if (element.Name == _ns + "Image")
+            {
+                return ProcessImageToHtml(element);
+            }
+
+            if (element.Name == _ns + "InsertedFile")
+            {
+                return ProcessInsertedFileToHtml(element);
+            }
+
+            if (element.Name == _ns + "Table")
+            {
+                // ProcessTable handles its own rows/cells recursively via GetCellContent.
+                // Do not recurse into the table again here, otherwise assets would be
+                // exported twice.
+                return ProcessTable(element);
+            }
+
+            // OE, OEChildren and any other OneNote wrapper elements are transparent for
+            // table-cell export. Recurse through all child elements so future/older
+            // OneNote wrapper combinations do not require another special case.
+            return ProcessTableCellContainer(element);
         }
 
         private string GetPlainText(XElement? oe)
