@@ -49,6 +49,8 @@ namespace OneNoteMarkdownExporter.Services
         public int UnprocessedImageObjects { get; private set; }
         public IReadOnlyList<string> UnprocessedImageDiagnostics => _unprocessedImageDiagnostics;
         private readonly List<string> _unprocessedImageDiagnostics = new();
+        public IReadOnlyList<string> ImageFailureDiagnostics => _imageFailureDiagnostics;
+        private readonly List<string> _imageFailureDiagnostics = new();
         public IReadOnlyList<string> AttachmentFailureDiagnostics => _attachmentFailureDiagnostics;
         private readonly List<string> _attachmentFailureDiagnostics = new();
 
@@ -88,6 +90,7 @@ namespace OneNoteMarkdownExporter.Services
             UnprocessedImageObjects = 0;
             _attachmentFailureDiagnostics.Clear();
             _unprocessedImageDiagnostics.Clear();
+            _imageFailureDiagnostics.Clear();
 
             var doc = XDocument.Parse(pageXml);
             if (doc.Root == null) return "";
@@ -604,9 +607,23 @@ namespace OneNoteMarkdownExporter.Services
                 {
                     FailedImageExports++;
 
-                    // Log additional info for debugging
                     var callbackId = image.Attribute("callbackID")?.Value;
                     var objectId = image.Attribute("objectID")?.Value;
+                    var format = image.Attribute("format")?.Value ?? "none";
+                    var isPrintOutValue = image.Attribute("isPrintOut")?.Value ?? "none";
+                    var xpsFileIndexValue = image.Attribute("xpsFileIndex")?.Value ?? "none";
+                    var parentName = image.Parent?.Name.LocalName ?? "none";
+                    var ancestorPath = string.Join(
+                        "/",
+                        image.AncestorsAndSelf()
+                            .Reverse()
+                            .Select(element => element.Name.LocalName));
+
+                    _imageFailureDiagnostics.Add(
+                        $"reason='no binary content'; callbackID='{callbackId ?? "none"}'; " +
+                        $"objectID='{objectId ?? "none"}'; format='{format}'; isPrintOut='{isPrintOutValue}'; " +
+                        $"xpsFileIndex='{xpsFileIndexValue}'; parent='{parentName}'; ancestorPath='{ancestorPath}'");
+
                     var info = $"callbackID={callbackId ?? "none"}, objectID={objectId ?? "none"}";
                     return $"<p><em>[Image - no embedded data, could not fetch binary content. {System.Net.WebUtility.HtmlEncode(info)}]</em></p>";
                 }
@@ -650,6 +667,25 @@ namespace OneNoteMarkdownExporter.Services
             catch (Exception ex)
             {
                 FailedImageExports++;
+
+                var callbackId = image.Attribute("callbackID")?.Value ?? "none";
+                var objectId = image.Attribute("objectID")?.Value ?? "none";
+                var format = image.Attribute("format")?.Value ?? "none";
+                var isPrintOutValue = image.Attribute("isPrintOut")?.Value ?? "none";
+                var xpsFileIndexValue = image.Attribute("xpsFileIndex")?.Value ?? "none";
+                var parentName = image.Parent?.Name.LocalName ?? "none";
+                var ancestorPath = string.Join(
+                    "/",
+                    image.AncestorsAndSelf()
+                        .Reverse()
+                        .Select(element => element.Name.LocalName));
+
+                _imageFailureDiagnostics.Add(
+                    $"reason='exception'; exception='{ex.GetType().Name}: {ex.Message}'; " +
+                    $"callbackID='{callbackId}'; objectID='{objectId}'; format='{format}'; " +
+                    $"isPrintOut='{isPrintOutValue}'; xpsFileIndex='{xpsFileIndexValue}'; " +
+                    $"parent='{parentName}'; ancestorPath='{ancestorPath}'");
+
                 return $"<p><em>[Image export failed: {System.Net.WebUtility.HtmlEncode(ex.Message)}]</em></p>";
             }
         }
