@@ -47,6 +47,8 @@ namespace OneNoteMarkdownExporter.Services
         public int FailedImageExports { get; private set; }
         public int SuppressedPrintoutImages { get; private set; }
         public int UnprocessedImageObjects { get; private set; }
+        public IReadOnlyList<string> UnprocessedImageDiagnostics => _unprocessedImageDiagnostics;
+        private readonly List<string> _unprocessedImageDiagnostics = new();
         public IReadOnlyList<string> AttachmentFailureDiagnostics => _attachmentFailureDiagnostics;
         private readonly List<string> _attachmentFailureDiagnostics = new();
 
@@ -85,6 +87,7 @@ namespace OneNoteMarkdownExporter.Services
             SuppressedPrintoutImages = 0;
             UnprocessedImageObjects = 0;
             _attachmentFailureDiagnostics.Clear();
+            _unprocessedImageDiagnostics.Clear();
 
             var doc = XDocument.Parse(pageXml);
             if (doc.Root == null) return "";
@@ -135,7 +138,33 @@ namespace OneNoteMarkdownExporter.Services
             // Track how many of those objects the normal conversion traversal actually reached.
             // Any remainder is reported explicitly instead of silently disappearing into the
             // completeness arithmetic.
-            UnprocessedImageObjects = Math.Max(0, SourceImages - _processedImageElements.Count);
+            var allImageElements = doc.Descendants(_ns + "Image").ToList();
+            var unprocessedImages = allImageElements
+                .Where(image => !_processedImageElements.Contains(image))
+                .ToList();
+
+            UnprocessedImageObjects = unprocessedImages.Count;
+
+            foreach (var image in unprocessedImages)
+            {
+                var callbackId = image.Attribute("callbackID")?.Value ?? "none";
+                var format = image.Attribute("format")?.Value ?? "none";
+                var isPrintOut = image.Attribute("isPrintOut")?.Value ?? "none";
+                var xpsFileIndex = image.Attribute("xpsFileIndex")?.Value ?? "none";
+                var parentName = image.Parent?.Name.LocalName ?? "none";
+                var grandParentName = image.Parent?.Parent?.Name.LocalName ?? "none";
+
+                var ancestorPath = string.Join(
+                    "/",
+                    image.AncestorsAndSelf()
+                        .Reverse()
+                        .Select(element => element.Name.LocalName));
+
+                _unprocessedImageDiagnostics.Add(
+                    $"callbackID='{callbackId}'; format='{format}'; isPrintOut='{isPrintOut}'; " +
+                    $"xpsFileIndex='{xpsFileIndex}'; parent='{parentName}'; grandParent='{grandParentName}'; " +
+                    $"ancestorPath='{ancestorPath}'");
+            }
 
             // Get the HTML and normalize anchor tags BEFORE ReverseMarkdown processing
             var html = htmlBuilder.ToString();
