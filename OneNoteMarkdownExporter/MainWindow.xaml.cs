@@ -90,7 +90,7 @@ namespace OneNoteMarkdownExporter
                     AssetOrganizationBox.SelectedIndex = settings.AssetOrganizationIndex.Value;
                 }
 
-if (settings.OverwriteExisting.HasValue)
+                if (settings.OverwriteExisting.HasValue)
                 {
                     OverwriteExistingBox.IsChecked = settings.OverwriteExisting.Value;
                 }
@@ -155,13 +155,10 @@ if (settings.OverwriteExisting.HasValue)
         {
             try
             {
+                // Only propose the default path in the UI. Do not create any folders
+                // until an export actually runs.
                 var downloadsPath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
                 downloadsPath = Path.Combine(downloadsPath, "Downloads", "OneNoteExport");
-
-                if (!Directory.Exists(downloadsPath))
-                {
-                    Directory.CreateDirectory(downloadsPath);
-                }
 
                 OutputPathBox.Text = downloadsPath;
                 AssetsPathBox.Text = AssetPathResolver.GetDefaultAssetsFolderPath(downloadsPath);
@@ -169,14 +166,10 @@ if (settings.OverwriteExisting.HasValue)
             catch (Exception ex)
             {
                 var fallbackPath = Path.Combine(Path.GetTempPath(), "OneNoteExport");
-                if (!Directory.Exists(fallbackPath))
-                {
-                    Directory.CreateDirectory(fallbackPath);
-                }
 
                 OutputPathBox.Text = fallbackPath;
                 AssetsPathBox.Text = AssetPathResolver.GetDefaultAssetsFolderPath(fallbackPath);
-                Log($"Could not set Downloads folder, using temp folder: {ex.Message}");
+                Log($"Could not determine Downloads folder, using temp path as UI default: {ex.Message}");
             }
         }
 
