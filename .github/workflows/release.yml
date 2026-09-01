@@ -18,20 +18,25 @@ permissions:
 jobs:
   build-and-release:
     runs-on: windows-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # Fetch all history for tags
+        fetch-depth: 0  # Fetch full history and tags
 
     - name: Get latest tag and increment version
       id: version
       shell: pwsh
       run: |
-        # Get the latest tag
-        $latestTag = git describe --tags --abbrev=0 2>$null
-        
+        # Fetch tags explicitly so the version calculation sees all remote tags.
+        git fetch --tags --force
+
+        # Get the highest semantic version tag, not merely the nearest tag
+        # reachable from the current commit.
+        $latestTag = git tag --list "v[0-9]*.[0-9]*.[0-9]*" --sort=-v:refname |
+          Select-Object -First 1
+
         if (-not $latestTag) {
           # No tags exist, start at v1.0.0
           $newVersion = "v1.0.0"
@@ -39,20 +44,20 @@ jobs:
           # Parse the version (assumes vX.Y.Z format)
           $version = $latestTag -replace '^v', ''
           $parts = $version -split '\.'
-          
+
           $major = [int]$parts[0]
           $minor = [int]$parts[1]
           $patch = [int]$parts[2]
-          
+
           # Increment patch version
           $patch++
-          
+
           $newVersion = "v$major.$minor.$patch"
         }
-        
+
         Write-Host "Latest tag: $latestTag"
         Write-Host "New version: $newVersion"
-        
+
         echo "version=$newVersion" >> $env:GITHUB_OUTPUT
         echo "latest=$latestTag" >> $env:GITHUB_OUTPUT
 
@@ -83,20 +88,31 @@ jobs:
       run: |
         # Create a clean release folder
         New-Item -ItemType Directory -Path ./release -Force
-        
+
         # Copy the exe and resources folder
         Copy-Item ./publish/OneNoteMarkdownExporter.exe ./release/
         Copy-Item -Recurse ./publish/resources ./release/resources
-        
+
         # Create the zip
         Compress-Archive -Path ./release/* -DestinationPath ./OneNoteMarkdownExporter-${{ steps.version.outputs.version }}.zip
 
     - name: Create tag
+      shell: pwsh
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
-        git tag ${{ steps.version.outputs.version }}
-        git push origin ${{ steps.version.outputs.version }}
+
+        $tag = "${{ steps.version.outputs.version }}"
+
+        # Defensive check: normally the version step above already guarantees
+        # a new tag, but do not fail the whole workflow if the tag appeared
+        # in the meantime.
+        if (git tag --list $tag) {
+          Write-Host "Tag $tag already exists; skipping tag creation."
+        } else {
+          git tag $tag
+          git push origin $tag
+        }
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
