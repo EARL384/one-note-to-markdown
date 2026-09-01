@@ -66,6 +66,7 @@ namespace OneNoteMarkdownExporter.Services
         int FailedImageExports { get; }
         int SuppressedPrintoutImages { get; }
         int UnprocessedImageObjects { get; }
+        IReadOnlyList<string> UnprocessedImageDiagnostics { get; }
         IReadOnlyList<string> AttachmentFailureDiagnostics { get; }
     }
 
@@ -1323,6 +1324,21 @@ namespace OneNoteMarkdownExporter.Services
                                 progress,
                                 ExportProgressKind.Warning,
                                 $"  ATTACHMENT DIAGNOSTIC: {diagnostic}",
+                                result,
+                                page,
+                                finalMdPath);
+                        }
+                    }
+
+                    if (_xmlConverter is IAssetExportStatisticsProvider imageStatsProvider
+                        && imageStatsProvider.UnprocessedImageDiagnostics.Count > 0)
+                    {
+                        foreach (var diagnostic in imageStatsProvider.UnprocessedImageDiagnostics)
+                        {
+                            Report(
+                                progress,
+                                ExportProgressKind.Warning,
+                                $"  UNPROCESSED IMAGE DIAGNOSTIC: {diagnostic}",
                                 result,
                                 page,
                                 finalMdPath);
