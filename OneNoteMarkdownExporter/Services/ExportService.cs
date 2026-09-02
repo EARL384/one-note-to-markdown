@@ -1478,24 +1478,24 @@ namespace OneNoteMarkdownExporter.Services
 
         private sealed class OneNoteXmlWatchdog : IDisposable
         {
-            private readonly Timer? _timer;
+            private readonly System.Threading.Timer? _timer;
             private int _stopped;
 
-            public OneNoteXmlWatchdog(Timer? timer)
+            public OneNoteXmlWatchdog(System.Threading.Timer? timer)
             {
                 _timer = timer;
             }
 
             public void Stop()
             {
-                if (Interlocked.Exchange(ref _stopped, 1) != 0)
+                if (System.Threading.Interlocked.Exchange(ref _stopped, 1) != 0)
                 {
                     return;
                 }
 
                 try
                 {
-                    _timer?.Change(Timeout.Infinite, Timeout.Infinite);
+                    _timer?.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
                 }
                 catch
                 {
@@ -1521,7 +1521,7 @@ namespace OneNoteMarkdownExporter.Services
         private OneNoteXmlWatchdog StartOneNoteXmlWatchdog(
             IProgress<ExportProgressUpdate>? progress,
             ExportResult result,
-            OneNotePage page,
+            OneNoteItem page,
             string finalMdPath,
             string? notebookName,
             string? sectionPath,
@@ -1532,8 +1532,8 @@ namespace OneNoteMarkdownExporter.Services
             var milestonesSeconds = new[] { 30, 60, 120, 300, 600 };
             var nextMilestoneIndex = 0;
 
-            Timer? timer = null;
-            timer = new Timer(
+            System.Threading.Timer? timer = null;
+            timer = new System.Threading.Timer(
                 _ =>
                 {
                     try
