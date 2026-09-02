@@ -788,7 +788,7 @@ namespace OneNoteMarkdownExporter.Services
                 foreach (var item in selectedItems)
                 {
                     if (cancellationToken.IsCancellationRequested) break;
-                    ExportItem(item, planner.OutputRoot, centralizedAssetsRoot, null, null, planner, pagePathIndexes, options, result, progress, cancellationToken);
+                    ExportItem(item, planner.OutputRoot, centralizedAssetsRoot, null, null, planner, pagePathIndexes, options, result, progress, cancellationToken, currentNotebookName: null, currentSectionPath: null);
                 }
             }, cancellationToken);
 
@@ -1287,7 +1287,9 @@ namespace OneNoteMarkdownExporter.Services
             ExportResult result,
             IProgress<ExportProgressUpdate>? progress,
             CancellationToken token,
-            bool isImplicitlySelected = false)
+            bool isImplicitlySelected = false,
+            string? currentNotebookName = null,
+            string? currentSectionPath = null)
         {
             if (token.IsCancellationRequested) return;
 
@@ -1295,6 +1297,29 @@ namespace OneNoteMarkdownExporter.Services
             bool hasSelectedDescendants = ExportSelectionHelper.HasSelectedDescendants(item);
 
             if (!isSelected && !hasSelectedDescendants) return;
+
+            // Carry explicit OneNote provenance through the recursion so diagnostics
+            // do not have to infer notebook/section names from the archive path.
+            var notebookNameForChildren = currentNotebookName;
+            var sectionPathForChildren = currentSectionPath;
+
+            if (item.Type == OneNoteItemType.Notebook)
+            {
+                notebookNameForChildren = item.Name;
+                sectionPathForChildren = null;
+            }
+            else if (item.Type == OneNoteItemType.SectionGroup)
+            {
+                sectionPathForChildren = string.IsNullOrWhiteSpace(sectionPathForChildren)
+                    ? item.Name
+                    : $"{sectionPathForChildren}/{item.Name}";
+            }
+            else if (item.Type == OneNoteItemType.Section)
+            {
+                sectionPathForChildren = string.IsNullOrWhiteSpace(sectionPathForChildren)
+                    ? item.Name
+                    : $"{sectionPathForChildren}/{item.Name}";
+            }
 
             string myPath = currentPath;
             if (item.Type != OneNoteItemType.Page)
@@ -1322,7 +1347,7 @@ namespace OneNoteMarkdownExporter.Services
                 foreach (var child in item.Children)
                 {
                     if (token.IsCancellationRequested) return;
-                    ExportItem(child, myPath, centralizedAssetsRoot, childNotebookAssetsFolder, childSectionAssetsFolder, planner, pagePathIndexes, options, result, progress, token, isSelected);
+                    ExportItem(child, myPath, centralizedAssetsRoot, childNotebookAssetsFolder, childSectionAssetsFolder, planner, pagePathIndexes, options, result, progress, token, isSelected, notebookNameForChildren, sectionPathForChildren);
                 }
             }
             else
@@ -1333,7 +1358,7 @@ namespace OneNoteMarkdownExporter.Services
                     var assetsFolderPath = GetAssetsFolderPathForPage(item, currentPath, centralizedAssetsRoot, notebookAssetsFolder, sectionAssetsFolder, planner, options);
                     var pageContext = planner.CreatePageContext(item, currentPath, assetsFolderPath);
                     var plannedPagePath = GetPlannedPagePath(item, pagePathIndexes);
-                    ExportPage(pageContext, plannedPagePath?.MarkdownFilePath, pagePathIndexes, options, result, progress, token);
+                    ExportPage(pageContext, plannedPagePath?.MarkdownFilePath, pagePathIndexes, options, result, progress, token, notebookNameForChildren, sectionPathForChildren);
                 }
 
                 if (item.Children.Count > 0)
@@ -1350,7 +1375,7 @@ namespace OneNoteMarkdownExporter.Services
                     {
                         if (token.IsCancellationRequested) return;
 
-                        ExportItem(child, myPath, centralizedAssetsRoot, notebookAssetsFolder, sectionAssetsFolder, planner, pagePathIndexes, options, result, progress, token, isSelected);
+                        ExportItem(child, myPath, centralizedAssetsRoot, notebookAssetsFolder, sectionAssetsFolder, planner, pagePathIndexes, options, result, progress, token, isSelected, notebookNameForChildren, sectionPathForChildren);
                     }
                 }
             }
@@ -1430,12 +1455,20 @@ namespace OneNoteMarkdownExporter.Services
             ExportOptions options,
             ExportResult result,
             IProgress<ExportProgressUpdate>? progress,
-            CancellationToken token)
+            CancellationToken token,
+            string? notebookName,
+            string? sectionPath)
         {
             if (token.IsCancellationRequested) return;
 
             var page = pageContext.Page;
             var finalMdPath = plannedMarkdownFilePath ?? pageContext.MarkdownFilePath;
+
+            var pageStopwatch = Stopwatch.StartNew();
+            var xmlElapsed = TimeSpan.Zero;
+            var conversionElapsed = TimeSpan.Zero;
+            var postProcessingElapsed = TimeSpan.Zero;
+            var writeElapsed = TimeSpan.Zero;
 
             if (!options.Quiet)
             {
@@ -1473,7 +1506,10 @@ namespace OneNoteMarkdownExporter.Services
                 ValidateAssetsFolderPath(pageContext.AssetsFolderPath);
 
                 // Get page content directly via XML (bypasses DLP/Publish restrictions)
+                var stageStopwatch = Stopwatch.StartNew();
                 var pageXml = _oneNoteService.GetPageContent(page.Id);
+                stageStopwatch.Stop();
+                xmlElapsed = stageStopwatch.Elapsed;
 
                 // Create a binary content fetcher for images that aren't embedded
                 BinaryContentFetcher binaryFetcher = (callbackId) => _oneNoteService.GetBinaryPageContent(page.Id, callbackId);
@@ -1482,7 +1518,10 @@ namespace OneNoteMarkdownExporter.Services
                 // Use the final collision-safe Markdown filename stem as the asset prefix so
                 // duplicate page titles cannot overwrite each other's images or attachments.
                 var assetPagePrefix = Path.GetFileNameWithoutExtension(finalMdPath);
+                stageStopwatch.Restart();
                 var markdown = _xmlConverter.Convert(pageXml, pageContext.AssetsFolderPath, pageContext.RelativeAssetsPath, binaryFetcher, assetPagePrefix);
+                stageStopwatch.Stop();
+                conversionElapsed = stageStopwatch.Elapsed;
 
                 var completenessOnPage = UpdateCompletenessStatistics(
                     result,
@@ -1498,7 +1537,8 @@ namespace OneNoteMarkdownExporter.Services
                         $"{completenessOnPage.FailedImages} image failure(s), " +
                         $"{completenessOnPage.UnprocessedImages} unprocessed image object(s), " +
                         $"{completenessOnPage.RecoveredOcrFallbacks} OCR text fallback(s) recovered. " +
-                        $"PageId='{page.Id}'; ArchivePath='{finalMdPath}'.";
+                        $"Notebook='{notebookName ?? "unknown"}'; Section='{sectionPath ?? "unknown"}'; " +
+                        $"Page='{page.Name}'; PageId='{page.Id}'; ArchivePath='{finalMdPath}'.";
                     result.Warnings.Add(completenessWarning);
                     Report(
                         progress,
@@ -1556,6 +1596,7 @@ namespace OneNoteMarkdownExporter.Services
 
                 // Translate OneNote page links to portable relative Markdown links whenever
                 // the target page is known in the currently opened OneNote hierarchy.
+                stageStopwatch.Restart();
                 markdown = RewriteOneNotePageLinks(markdown, finalMdPath, pagePathIndexes);
 
                 if (options.DateMetadataMode == DateMetadataMode.Yaml)
@@ -1594,12 +1635,39 @@ namespace OneNoteMarkdownExporter.Services
                     }
                 }
 
+                stageStopwatch.Stop();
+                postProcessingElapsed = stageStopwatch.Elapsed;
+
+                stageStopwatch.Restart();
                 ExecuteOutputWriteWithRetry(
                     () => File.WriteAllText(finalMdPath, markdown),
                     $"writing Markdown page '{finalMdPath}'");
+                stageStopwatch.Stop();
+                writeElapsed = stageStopwatch.Elapsed;
                 ApplyPageTimestamps(finalMdPath, page, options, result, progress);
                 result.ExportedPages++;
                 Report(progress, ExportProgressKind.PageExported, $"  Exported successfully: {page.Name}", result, page, finalMdPath);
+
+                pageStopwatch.Stop();
+                if (pageStopwatch.Elapsed >= TimeSpan.FromSeconds(5))
+                {
+                    var slowPageMessage =
+                        $"PERF SLOW PAGE: Notebook='{notebookName ?? "unknown"}'; " +
+                        $"Section='{sectionPath ?? "unknown"}'; Page='{page.Name}'; " +
+                        $"Duration={pageStopwatch.Elapsed.TotalSeconds:F1}s; " +
+                        $"OneNoteXml={xmlElapsed.TotalSeconds:F1}s; " +
+                        $"ConvertAndAssets={conversionElapsed.TotalSeconds:F1}s; " +
+                        $"PostProcessing={postProcessingElapsed.TotalSeconds:F1}s; " +
+                        $"MarkdownWrite={writeElapsed.TotalSeconds:F1}s; " +
+                        $"PageId='{page.Id}'; ArchivePath='{finalMdPath}'.";
+                    Report(
+                        progress,
+                        ExportProgressKind.Message,
+                        slowPageMessage,
+                        result,
+                        page,
+                        finalMdPath);
+                }
 
                 if (options.Verbose)
                 {
