@@ -299,7 +299,10 @@ namespace OneNoteMarkdownExporter.Services
 
                 _disposed = true;
 
-                // First close/flush the local writer. Any failure here is diagnostic only.
+                // IMPORTANT: Dispose must remain LOCAL-ONLY.
+                // ExportSelectedAsync/ExportAsync can resume on the WPF UI thread after
+                // awaiting the background export. Any synchronous access to the NAS here
+                // can freeze the UI if the SMB/network path is unavailable.
                 try
                 {
                     lock (_sync)
@@ -312,9 +315,12 @@ namespace OneNoteMarkdownExporter.Services
                 {
                     DisableLocalLogging(ex);
                 }
+            }
 
-                // Then archive the complete LOCAL log to the export destination. This is the
-                // only network/NAS operation performed by the logger during a normal run.
+            public void ArchiveCompletedLogBestEffort()
+            {
+                // This method may touch the network and therefore MUST be called from a
+                // background task, never from Dispose / the UI thread.
                 if (_localLoggingDisabled || !File.Exists(LocalLogFilePath))
                 {
                     return;
@@ -401,6 +407,7 @@ namespace OneNoteMarkdownExporter.Services
             var result = new ExportResult();
             ExportRunFileProgress? fileProgress = null;
             var runProgress = progress;
+            var completedSuccessfully = false;
 
             try
             {
@@ -421,7 +428,8 @@ namespace OneNoteMarkdownExporter.Services
 
                 // Apply selection criteria
                 var selectedItems = ApplySelectionCriteria(notebooks, options);
-                return await ExportItemsAsync(selectedItems, notebooks, options, runProgress, cancellationToken);
+                result = await ExportItemsAsync(selectedItems, notebooks, options, runProgress, cancellationToken);
+                completedSuccessfully = string.IsNullOrWhiteSpace(result.Error);
             }
             catch (Exception ex)
             {
@@ -430,7 +438,16 @@ namespace OneNoteMarkdownExporter.Services
             }
             finally
             {
+                // Close/flush the LOCAL log first. This does not touch the NAS.
                 fileProgress?.Dispose();
+            }
+
+            // Archive only completed runs, and only on a worker thread. If the network
+            // failed during export, deliberately skip the NAS archive attempt so the app
+            // can return control to the user immediately; the complete local log remains.
+            if (completedSuccessfully && fileProgress != null)
+            {
+                await Task.Run(fileProgress.ArchiveCompletedLogBestEffort);
             }
 
             return result;
@@ -445,6 +462,7 @@ namespace OneNoteMarkdownExporter.Services
             var result = new ExportResult();
             ExportRunFileProgress? fileProgress = null;
             var runProgress = progress;
+            var completedSuccessfully = false;
 
             try
             {
@@ -464,7 +482,8 @@ namespace OneNoteMarkdownExporter.Services
                     ExportProgressKind.Message,
                     $"PERF: Full OneNote hierarchy loaded in {FormatPerformanceDuration(hierarchyStopwatch.Elapsed)}.");
 
-                return await ExportItemsAsync(items, fullHierarchy, options, runProgress, cancellationToken);
+                result = await ExportItemsAsync(items, fullHierarchy, options, runProgress, cancellationToken);
+                completedSuccessfully = string.IsNullOrWhiteSpace(result.Error);
             }
             catch (Exception ex)
             {
@@ -473,7 +492,15 @@ namespace OneNoteMarkdownExporter.Services
             }
             finally
             {
+                // Close/flush the LOCAL log first. This does not touch the NAS.
                 fileProgress?.Dispose();
+            }
+
+            // Never touch the failed SMB/NAS destination again after an infrastructure
+            // failure. On successful runs the archive copy happens off the UI thread.
+            if (completedSuccessfully && fileProgress != null)
+            {
+                await Task.Run(fileProgress.ArchiveCompletedLogBestEffort);
             }
 
             return result;
