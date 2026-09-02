@@ -1475,6 +1475,103 @@ namespace OneNoteMarkdownExporter.Services
         }
 
 
+
+        private sealed class OneNoteXmlWatchdog : IDisposable
+        {
+            private readonly Timer? _timer;
+            private int _stopped;
+
+            public OneNoteXmlWatchdog(Timer? timer)
+            {
+                _timer = timer;
+            }
+
+            public void Stop()
+            {
+                if (Interlocked.Exchange(ref _stopped, 1) != 0)
+                {
+                    return;
+                }
+
+                try
+                {
+                    _timer?.Change(Timeout.Infinite, Timeout.Infinite);
+                }
+                catch
+                {
+                    // Diagnostics must never affect the export.
+                }
+            }
+
+            public void Dispose()
+            {
+                Stop();
+
+                try
+                {
+                    _timer?.Dispose();
+                }
+                catch
+                {
+                    // Diagnostics must never affect the export.
+                }
+            }
+        }
+
+        private OneNoteXmlWatchdog StartOneNoteXmlWatchdog(
+            IProgress<ExportProgressUpdate>? progress,
+            ExportResult result,
+            OneNotePage page,
+            string finalMdPath,
+            string? notebookName,
+            string? sectionPath,
+            Stopwatch stageStopwatch)
+        {
+            // Sparse milestones keep the log useful without flooding the UI.
+            // No timeout is enforced here; this is diagnosis only.
+            var milestonesSeconds = new[] { 30, 60, 120, 300, 600 };
+            var nextMilestoneIndex = 0;
+
+            Timer? timer = null;
+            timer = new Timer(
+                _ =>
+                {
+                    try
+                    {
+                        var elapsedSeconds = stageStopwatch.Elapsed.TotalSeconds;
+
+                        while (nextMilestoneIndex < milestonesSeconds.Length &&
+                               elapsedSeconds >= milestonesSeconds[nextMilestoneIndex])
+                        {
+                            var milestone = milestonesSeconds[nextMilestoneIndex];
+                            nextMilestoneIndex++;
+
+                            Report(
+                                progress,
+                                ExportProgressKind.Warning,
+                                $"WARNING: OneNote page retrieval still running. " +
+                                $"Notebook='{notebookName ?? "unknown"}'; " +
+                                $"Section='{sectionPath ?? "unknown"}'; " +
+                                $"Page='{page.Name}'; Elapsed={milestone}s; " +
+                                $"Stage='OneNoteXml'; PageId='{page.Id}'; " +
+                                $"ArchivePath='{finalMdPath}'.",
+                                result,
+                                page,
+                                finalMdPath);
+                        }
+                    }
+                    catch
+                    {
+                        // Diagnostics must never affect the export.
+                    }
+                },
+                null,
+                dueTime: TimeSpan.FromSeconds(30),
+                period: TimeSpan.FromSeconds(5));
+
+            return new OneNoteXmlWatchdog(timer);
+        }
+
         private void ExportPage(
             PageExportContext pageContext,
             string? plannedMarkdownFilePath,
@@ -1532,9 +1629,23 @@ namespace OneNoteMarkdownExporter.Services
             {
                 ValidateAssetsFolderPath(pageContext.AssetsFolderPath);
 
-                // Get page content directly via XML (bypasses DLP/Publish restrictions)
+                // Get page content directly via XML (bypasses DLP/Publish restrictions).
+                // This COM call can occasionally take a very long time for individual
+                // OneNote pages. A watchdog reports diagnostic milestones while the call
+                // is still running. It never cancels or interrupts OneNote.
                 var stageStopwatch = Stopwatch.StartNew();
+                using var oneNoteXmlWatchdog = StartOneNoteXmlWatchdog(
+                    progress,
+                    result,
+                    page,
+                    finalMdPath,
+                    notebookName,
+                    sectionPath,
+                    stageStopwatch);
+
                 var pageXml = _oneNoteService.GetPageContent(page.Id);
+
+                oneNoteXmlWatchdog.Stop();
                 stageStopwatch.Stop();
                 xmlElapsed = stageStopwatch.Elapsed;
 
