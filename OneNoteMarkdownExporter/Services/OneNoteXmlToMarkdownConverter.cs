@@ -616,10 +616,32 @@ namespace OneNoteMarkdownExporter.Services
                             .Reverse()
                             .Select(element => element.Name.LocalName));
 
+                    // OneNote can retain OCR metadata even when the original image/printout
+                    // binary is no longer available. Record whether recoverable OCR text is
+                    // still present so we can distinguish "content completely lost" from
+                    // "visual lost, text potentially recoverable".
+                    var ocrDataElements = image.Elements(_ns + "OCRData").ToList();
+                    var ocrTextElements = image
+                        .Descendants(_ns + "OCRText")
+                        .Where(element => !string.IsNullOrWhiteSpace(element.Value))
+                        .ToList();
+
+                    var ocrText = string.Join(
+                        Environment.NewLine,
+                        ocrTextElements.Select(element => element.Value.Trim()));
+
+                    var ocrPreview = Regex.Replace(ocrText, @"\s+", " ").Trim();
+                    if (ocrPreview.Length > 240)
+                    {
+                        ocrPreview = ocrPreview.Substring(0, 240) + "...";
+                    }
+
                     _imageFailureDiagnostics.Add(
                         $"reason='no binary content'; callbackID='{callbackId ?? "none"}'; " +
                         $"objectID='{objectId ?? "none"}'; format='{diagnosticFormat}'; isPrintOut='{isPrintOutValue}'; " +
-                        $"xpsFileIndex='{xpsFileIndexValue}'; parent='{parentName}'; ancestorPath='{ancestorPath}'");
+                        $"xpsFileIndex='{xpsFileIndexValue}'; parent='{parentName}'; ancestorPath='{ancestorPath}'; " +
+                        $"ocrDataElements={ocrDataElements.Count}; ocrTextElements={ocrTextElements.Count}; " +
+                        $"ocrTextLength={ocrText.Length}; ocrPreview='{ocrPreview.Replace("'", "''")}'");
 
                     var info = $"callbackID={callbackId ?? "none"}, objectID={objectId ?? "none"}";
                     return $"<p><em>[Image - no embedded data, could not fetch binary content. {System.Net.WebUtility.HtmlEncode(info)}]</em></p>";
