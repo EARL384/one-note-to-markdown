@@ -14,6 +14,14 @@ namespace OneNoteMarkdownExporter.Services
         public const int MaxWin32DirectoryPathLength = MaxWin32PathLength - 14;
 
         private const int MaxComponentLength = 255;
+
+        // Many NAS/Linux filesystems (including typical Synology volumes) limit a single
+        // filename component to 255 UTF-8 bytes, not 255 Unicode characters. Windows/NTFS
+        // normally measures differently, so names containing many non-ASCII characters can
+        // look short enough on Windows while still being rejected by an SMB/NAS target.
+        // Keep one byte of safety margin below the common 255-byte filesystem limit.
+        private const int MaxComponentUtf8Bytes = 254;
+
         private const int HashLength = 8;
         private const string DefaultFallbackName = "Untitled";
 
@@ -44,7 +52,12 @@ namespace OneNoteMarkdownExporter.Services
 
         public static string GetMarkdownFileName(string? pageName, string? pageId = null)
         {
-            return $"{SanitizeComponent(pageName, DefaultFallbackName, pageId)}.md";
+            var stem = SanitizeComponent(pageName, DefaultFallbackName, pageId);
+            return FitComponentToLimits(
+                stem,
+                ".md",
+                MaxComponentLength,
+                pageId ?? pageName ?? DefaultFallbackName);
         }
 
         public static string GetSafeDirectoryPath(string parentPath, string? componentName, string? stableId = null, string fallbackName = DefaultFallbackName)
@@ -267,8 +280,21 @@ namespace OneNoteMarkdownExporter.Services
                 throw new PathTooLongException($"The export path is too long to create a file or folder under '{parentPath}'.");
             }
 
+            return FitComponentToLimits(stem, extension, maxComponentLength, stableInput);
+        }
+
+        private static string FitComponentToLimits(string stem, string extension, int maxComponentLength, string stableInput)
+        {
+            extension = NormalizeExtension(extension);
+
+            if (maxComponentLength < extension.Length + 1)
+            {
+                throw new PathTooLongException("The export path is too long to preserve the file extension.");
+            }
+
             var fullComponent = $"{stem}{extension}";
-            if (fullComponent.Length <= maxComponentLength)
+            if (fullComponent.Length <= maxComponentLength
+                && Encoding.UTF8.GetByteCount(fullComponent) <= MaxComponentUtf8Bytes)
             {
                 return fullComponent;
             }
@@ -296,21 +322,67 @@ namespace OneNoteMarkdownExporter.Services
 
             var hash = GetStableHash(stableInput);
             var suffix = $"_{hash}";
-            if (maxStemLength <= suffix.Length)
+            var suffixWithExtension = $"{suffix}{extension}";
+
+            // Respect both the Windows component/path character budget and the UTF-8 byte
+            // budget used by common NAS/Linux filesystems.
+            var maxPrefixCharacters = Math.Max(0, maxStemLength - suffix.Length);
+            var maxPrefixUtf8Bytes = Math.Max(
+                0,
+                MaxComponentUtf8Bytes - Encoding.UTF8.GetByteCount(suffixWithExtension));
+
+            if (maxPrefixCharacters == 0 || maxPrefixUtf8Bytes == 0)
             {
-                return $"{hash[..maxStemLength]}{extension}";
+                var hashOnly = TruncateToLimits(
+                    hash,
+                    Math.Max(1, maxStemLength),
+                    Math.Max(1, MaxComponentUtf8Bytes - Encoding.UTF8.GetByteCount(extension)));
+
+                return $"{hashOnly}{extension}";
             }
 
-            var prefixLength = maxStemLength - suffix.Length;
-            var prefix = stem.Length <= prefixLength ? stem : stem[..prefixLength];
-            prefix = prefix.TrimEnd(' ', '.', '_');
+            var prefix = TruncateToLimits(stem, maxPrefixCharacters, maxPrefixUtf8Bytes)
+                .TrimEnd(' ', '.', '_');
 
             if (string.IsNullOrWhiteSpace(prefix))
             {
-                prefix = DefaultFallbackName[..Math.Min(DefaultFallbackName.Length, prefixLength)];
+                prefix = TruncateToLimits(
+                    DefaultFallbackName,
+                    maxPrefixCharacters,
+                    maxPrefixUtf8Bytes);
             }
 
             return $"{prefix}{suffix}{extension}";
+        }
+
+        private static string TruncateToLimits(string value, int maxCharacters, int maxUtf8Bytes)
+        {
+            if (maxCharacters <= 0 || maxUtf8Bytes <= 0 || string.IsNullOrEmpty(value))
+            {
+                return string.Empty;
+            }
+
+            var result = new StringBuilder();
+            var charactersUsed = 0;
+            var bytesUsed = 0;
+
+            foreach (var rune in value.EnumerateRunes())
+            {
+                var runeCharacters = rune.Utf16SequenceLength;
+                var runeBytes = rune.Utf8SequenceLength;
+
+                if (charactersUsed + runeCharacters > maxCharacters
+                    || bytesUsed + runeBytes > maxUtf8Bytes)
+                {
+                    break;
+                }
+
+                result.Append(rune.ToString());
+                charactersUsed += runeCharacters;
+                bytesUsed += runeBytes;
+            }
+
+            return result.ToString();
         }
 
         private static string GetStableHash(string stableInput)
