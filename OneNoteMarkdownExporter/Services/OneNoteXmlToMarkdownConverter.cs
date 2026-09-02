@@ -47,6 +47,7 @@ namespace OneNoteMarkdownExporter.Services
         public int FailedImageExports { get; private set; }
         public int SuppressedPrintoutImages { get; private set; }
         public int UnprocessedImageObjects { get; private set; }
+        public int RecoveredImageOcrFallbacks { get; private set; }
         public IReadOnlyList<string> UnprocessedImageDiagnostics => _unprocessedImageDiagnostics;
         private readonly List<string> _unprocessedImageDiagnostics = new();
         public IReadOnlyList<string> ImageFailureDiagnostics => _imageFailureDiagnostics;
@@ -88,6 +89,7 @@ namespace OneNoteMarkdownExporter.Services
             FailedImageExports = 0;
             SuppressedPrintoutImages = 0;
             UnprocessedImageObjects = 0;
+            RecoveredImageOcrFallbacks = 0;
             _attachmentFailureDiagnostics.Clear();
             _unprocessedImageDiagnostics.Clear();
             _imageFailureDiagnostics.Clear();
@@ -636,14 +638,33 @@ namespace OneNoteMarkdownExporter.Services
                         ocrPreview = ocrPreview.Substring(0, 240) + "...";
                     }
 
+                    var ocrFallbackExported = !string.IsNullOrWhiteSpace(ocrText);
+                    if (ocrFallbackExported)
+                    {
+                        RecoveredImageOcrFallbacks++;
+                    }
+
                     _imageFailureDiagnostics.Add(
                         $"reason='no binary content'; callbackID='{callbackId ?? "none"}'; " +
                         $"objectID='{objectId ?? "none"}'; format='{diagnosticFormat}'; isPrintOut='{isPrintOutValue}'; " +
                         $"xpsFileIndex='{xpsFileIndexValue}'; parent='{parentName}'; ancestorPath='{ancestorPath}'; " +
                         $"ocrDataElements={ocrDataElements.Count}; ocrTextElements={ocrTextElements.Count}; " +
-                        $"ocrTextLength={ocrText.Length}; ocrPreview='{ocrPreview.Replace("'", "''")}'");
+                        $"ocrTextLength={ocrText.Length}; ocrFallbackExported={ocrFallbackExported.ToString().ToLowerInvariant()}; " +
+                        $"ocrPreview='{ocrPreview.Replace("'", "''")}'");
 
                     var info = $"callbackID={callbackId ?? "none"}, objectID={objectId ?? "none"}";
+
+                    if (ocrFallbackExported)
+                    {
+                        var encodedOcrText = System.Net.WebUtility.HtmlEncode(ocrText);
+                        return
+                            $"<blockquote><p><strong>Archive note:</strong> " +
+                            $"The original OneNote image/printout is unavailable in the source notebook. " +
+                            $"OneNote OCR text was preserved as a fallback. {System.Net.WebUtility.HtmlEncode(info)}</p></blockquote>" +
+                            $"<h4>Recovered OneNote OCR text</h4>" +
+                            $"<pre>{encodedOcrText}</pre>";
+                    }
+
                     return $"<p><em>[Image - no embedded data, could not fetch binary content. {System.Net.WebUtility.HtmlEncode(info)}]</em></p>";
                 }
                 
