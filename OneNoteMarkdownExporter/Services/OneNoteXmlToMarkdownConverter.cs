@@ -714,11 +714,10 @@ namespace OneNoteMarkdownExporter.Services
                 var relativePath = $"{_relativeAssetsPath}/{fileName}".Replace("\\", "/");
                 return $"<p><img src=\"{relativePath}\" alt=\"image\" /></p>";
             }
-            catch (IOException)
+            catch (StorageWriteException)
             {
-                // A storage/network failure is infrastructure failure, not a damaged OneNote
-                // image. Bubble it up so the export run can stop instead of producing hundreds
-                // of misleading per-page image failures while the NAS is unavailable.
+                // A confirmed transient-network failure that survived all retries is
+                // infrastructure failure, not a damaged OneNote image.
                 throw;
             }
             catch (Exception ex)
@@ -748,6 +747,25 @@ namespace OneNoteMarkdownExporter.Services
         }
 
 
+        private static bool IsRetryableNetworkIOException(IOException ex)
+        {
+            var win32Error = ex.HResult & 0xFFFF;
+
+            return win32Error is
+                53
+                or 59
+                or 64
+                or 67
+                or 121
+                or 1201
+                or 1203
+                or 1231
+                or 1232
+                or 1236
+                or 1237
+                or 2250;
+        }
+
         private static void ExecuteFileSystemWriteWithRetry(Action action, string operationDescription)
         {
             var delays = new[] { 1000, 3000 };
@@ -759,13 +777,13 @@ namespace OneNoteMarkdownExporter.Services
                     action();
                     return;
                 }
-                catch (IOException ex) when (attempt < delays.Length)
+                catch (IOException ex) when (IsRetryableNetworkIOException(ex) && attempt < delays.Length)
                 {
                     Thread.Sleep(delays[attempt]);
                 }
-                catch (IOException ex)
+                catch (IOException ex) when (IsRetryableNetworkIOException(ex))
                 {
-                    throw new IOException(
+                    throw new StorageWriteException(
                         $"Storage/network write failed after {delays.Length + 1} attempt(s) while {operationDescription}: {ex.Message}",
                         ex);
                 }
@@ -918,9 +936,9 @@ namespace OneNoteMarkdownExporter.Services
                 var encodedName = System.Net.WebUtility.HtmlEncode(displayName);
                 return ($"<p><a href=\"{encodedHref}\">{encodedName}</a></p>", true);
             }
-            catch (IOException)
+            catch (StorageWriteException)
             {
-                // Do not misclassify a NAS/SMB outage as a missing OneNote attachment.
+                // Do not misclassify a confirmed NAS/SMB outage as a missing OneNote attachment.
                 throw;
             }
             catch (Exception ex)
