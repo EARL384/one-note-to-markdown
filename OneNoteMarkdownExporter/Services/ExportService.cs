@@ -11,6 +11,15 @@ using OneNoteMarkdownExporter.Models;
 
 namespace OneNoteMarkdownExporter.Services
 {
+
+    internal sealed class StorageWriteException : IOException
+    {
+        public StorageWriteException(string message, Exception innerException)
+            : base(message, innerException)
+        {
+        }
+    }
+
     public enum ExportProgressKind
     {
         Message,
@@ -1366,6 +1375,29 @@ namespace OneNoteMarkdownExporter.Services
             };
         }
 
+        private static bool IsRetryableNetworkIOException(IOException ex)
+        {
+            // IOException.HResult wraps the underlying Win32 error in the low 16 bits.
+            // Retry only errors that genuinely indicate a transient network/SMB problem.
+            // Deterministic local path errors (for example: a file exists where a folder
+            // should be) must remain normal page failures and must not abort the whole run.
+            var win32Error = ex.HResult & 0xFFFF;
+
+            return win32Error is
+                53   // ERROR_BAD_NETPATH
+                or 59   // ERROR_UNEXP_NET_ERR
+                or 64   // ERROR_NETNAME_DELETED
+                or 67   // ERROR_BAD_NET_NAME
+                or 121  // ERROR_SEM_TIMEOUT
+                or 1201 // ERROR_CONNECTION_UNAVAIL
+                or 1203 // ERROR_NO_NET_OR_BAD_PATH
+                or 1231 // ERROR_NETWORK_UNREACHABLE
+                or 1232 // ERROR_HOST_UNREACHABLE
+                or 1236 // ERROR_CONNECTION_ABORTED
+                or 1237 // ERROR_RETRY
+                or 2250; // ERROR_NOT_CONNECTED
+        }
+
         private static void ExecuteOutputWriteWithRetry(Action action, string operationDescription)
         {
             var delays = new[] { 1000, 3000 };
@@ -1377,13 +1409,13 @@ namespace OneNoteMarkdownExporter.Services
                     action();
                     return;
                 }
-                catch (IOException) when (attempt < delays.Length)
+                catch (IOException ex) when (IsRetryableNetworkIOException(ex) && attempt < delays.Length)
                 {
                     Thread.Sleep(delays[attempt]);
                 }
-                catch (IOException ex)
+                catch (IOException ex) when (IsRetryableNetworkIOException(ex))
                 {
-                    throw new IOException(
+                    throw new StorageWriteException(
                         $"Storage/network write failed after {delays.Length + 1} attempt(s) while {operationDescription}: {ex.Message}",
                         ex);
                 }
@@ -1574,7 +1606,7 @@ namespace OneNoteMarkdownExporter.Services
                     Report(progress, ExportProgressKind.Message, $"  Saved: {finalMdPath}", result, page, finalMdPath);
                 }
             }
-            catch (IOException ex)
+            catch (StorageWriteException ex)
             {
                 var infrastructureMessage =
                     $"Storage/network infrastructure failure while exporting '{page.Name}'. " +
