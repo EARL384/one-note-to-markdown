@@ -1559,7 +1559,7 @@ namespace OneNoteMarkdownExporter.Services
         {
             if (stats == null)
             {
-                return (0, 0, 0);
+                return (0, 0, 0, 0);
             }
 
             result.SourceAttachments += stats.SourceAttachments;
