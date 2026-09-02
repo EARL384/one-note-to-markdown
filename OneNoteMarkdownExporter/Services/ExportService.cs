@@ -1366,6 +1366,31 @@ namespace OneNoteMarkdownExporter.Services
             };
         }
 
+        private static void ExecuteOutputWriteWithRetry(Action action, string operationDescription)
+        {
+            var delays = new[] { 1000, 3000 };
+
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    action();
+                    return;
+                }
+                catch (IOException) when (attempt < delays.Length)
+                {
+                    Thread.Sleep(delays[attempt]);
+                }
+                catch (IOException ex)
+                {
+                    throw new IOException(
+                        $"Storage/network write failed after {delays.Length + 1} attempt(s) while {operationDescription}: {ex.Message}",
+                        ex);
+                }
+            }
+        }
+
+
         private void ExportPage(
             PageExportContext pageContext,
             string? plannedMarkdownFilePath,
@@ -1385,7 +1410,9 @@ namespace OneNoteMarkdownExporter.Services
                 Report(progress, ExportProgressKind.PageStarted, $"Exporting: {page.Name}", result, page, finalMdPath);
             }
 
-            Directory.CreateDirectory(pageContext.MarkdownFolderPath);
+            ExecuteOutputWriteWithRetry(
+                () => Directory.CreateDirectory(pageContext.MarkdownFolderPath),
+                $"creating Markdown folder '{pageContext.MarkdownFolderPath}'");
 
             // Handle file existence based on overwrite setting
             if (File.Exists(finalMdPath))
@@ -1535,7 +1562,9 @@ namespace OneNoteMarkdownExporter.Services
                     }
                 }
 
-                File.WriteAllText(finalMdPath, markdown);
+                ExecuteOutputWriteWithRetry(
+                    () => File.WriteAllText(finalMdPath, markdown),
+                    $"writing Markdown page '{finalMdPath}'");
                 ApplyPageTimestamps(finalMdPath, page, options, result, progress);
                 result.ExportedPages++;
                 Report(progress, ExportProgressKind.PageExported, $"  Exported successfully: {page.Name}", result, page, finalMdPath);
@@ -1544,6 +1573,22 @@ namespace OneNoteMarkdownExporter.Services
                 {
                     Report(progress, ExportProgressKind.Message, $"  Saved: {finalMdPath}", result, page, finalMdPath);
                 }
+            }
+            catch (IOException ex)
+            {
+                var infrastructureMessage =
+                    $"Storage/network infrastructure failure while exporting '{page.Name}'. " +
+                    $"The export run is being stopped to avoid creating many incomplete pages. " +
+                    $"Already completed pages remain valid. Details: {ex.Message}";
+                result.Warnings.Add(infrastructureMessage);
+                Report(
+                    progress,
+                    ExportProgressKind.Warning,
+                    infrastructureMessage,
+                    result,
+                    page,
+                    finalMdPath);
+                throw;
             }
             catch (Exception ex)
             {
