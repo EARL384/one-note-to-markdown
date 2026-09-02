@@ -698,17 +698,28 @@ namespace OneNoteMarkdownExporter.Services
                 // Ensure assets folder exists
                 if (!Directory.Exists(_assetsFolder))
                 {
-                    Directory.CreateDirectory(_assetsFolder);
+                    ExecuteFileSystemWriteWithRetry(
+                        () => Directory.CreateDirectory(_assetsFolder),
+                        $"creating assets folder '{_assetsFolder}'");
                 }
 
                 // Decode and save
                 var imageBytes = System.Convert.FromBase64String(base64Data);
-                File.WriteAllBytes(filePath, imageBytes);
+                ExecuteFileSystemWriteWithRetry(
+                    () => File.WriteAllBytes(filePath, imageBytes),
+                    $"writing image '{filePath}'");
                 SuccessfulImageExports++;
 
                 // Return HTML img tag
                 var relativePath = $"{_relativeAssetsPath}/{fileName}".Replace("\\", "/");
                 return $"<p><img src=\"{relativePath}\" alt=\"image\" /></p>";
+            }
+            catch (IOException)
+            {
+                // A storage/network failure is infrastructure failure, not a damaged OneNote
+                // image. Bubble it up so the export run can stop instead of producing hundreds
+                // of misleading per-page image failures while the NAS is unavailable.
+                throw;
             }
             catch (Exception ex)
             {
@@ -733,6 +744,31 @@ namespace OneNoteMarkdownExporter.Services
                     $"parent='{parentName}'; ancestorPath='{ancestorPath}'");
 
                 return $"<p><em>[Image export failed: {System.Net.WebUtility.HtmlEncode(ex.Message)}]</em></p>";
+            }
+        }
+
+
+        private static void ExecuteFileSystemWriteWithRetry(Action action, string operationDescription)
+        {
+            var delays = new[] { 1000, 3000 };
+
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    action();
+                    return;
+                }
+                catch (IOException ex) when (attempt < delays.Length)
+                {
+                    Thread.Sleep(delays[attempt]);
+                }
+                catch (IOException ex)
+                {
+                    throw new IOException(
+                        $"Storage/network write failed after {delays.Length + 1} attempt(s) while {operationDescription}: {ex.Message}",
+                        ex);
+                }
             }
         }
 
@@ -842,7 +878,9 @@ namespace OneNoteMarkdownExporter.Services
 
                 if (!Directory.Exists(_assetsFolder))
                 {
-                    Directory.CreateDirectory(_assetsFolder);
+                    ExecuteFileSystemWriteWithRetry(
+                        () => Directory.CreateDirectory(_assetsFolder),
+                        $"creating assets folder '{_assetsFolder}'");
                 }
 
                 _attachmentCounter++;
@@ -863,7 +901,9 @@ namespace OneNoteMarkdownExporter.Services
                     }
                 }
 
-                File.Copy(sourcePath, filePath, true);
+                ExecuteFileSystemWriteWithRetry(
+                    () => File.Copy(sourcePath, filePath, true),
+                    $"copying attachment to '{filePath}'");
 
                 var copiedAttributes = File.GetAttributes(filePath);
                 if ((copiedAttributes & FileAttributes.ReadOnly) != 0)
@@ -877,6 +917,11 @@ namespace OneNoteMarkdownExporter.Services
                 var encodedHref = System.Net.WebUtility.HtmlEncode(relativePath);
                 var encodedName = System.Net.WebUtility.HtmlEncode(displayName);
                 return ($"<p><a href=\"{encodedHref}\">{encodedName}</a></p>", true);
+            }
+            catch (IOException)
+            {
+                // Do not misclassify a NAS/SMB outage as a missing OneNote attachment.
+                throw;
             }
             catch (Exception ex)
             {
