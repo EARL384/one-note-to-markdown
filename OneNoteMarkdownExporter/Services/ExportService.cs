@@ -70,6 +70,7 @@ namespace OneNoteMarkdownExporter.Services
         IReadOnlyList<string> UnprocessedImageDiagnostics { get; }
         IReadOnlyList<string> ImageFailureDiagnostics { get; }
         IReadOnlyList<string> AttachmentFailureDiagnostics { get; }
+        IReadOnlyList<string> AttachmentPrintoutDiagnostics { get; }
     }
 
     public interface IMarkdownLintService
@@ -1457,6 +1458,21 @@ namespace OneNoteMarkdownExporter.Services
                                 progress,
                                 ExportProgressKind.Warning,
                                 $"  ATTACHMENT DIAGNOSTIC: {diagnostic}",
+                                result,
+                                page,
+                                finalMdPath);
+                        }
+                    }
+
+                    if (_xmlConverter is IAssetExportStatisticsProvider printoutMappingStatsProvider
+                        && printoutMappingStatsProvider.AttachmentPrintoutDiagnostics.Count > 0)
+                    {
+                        foreach (var diagnostic in printoutMappingStatsProvider.AttachmentPrintoutDiagnostics)
+                        {
+                            Report(
+                                progress,
+                                ExportProgressKind.Warning,
+                                $"  ATTACHMENT/PRINTOUT MAPPING DIAGNOSTIC: {diagnostic}",
                                 result,
                                 page,
                                 finalMdPath);
