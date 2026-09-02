@@ -66,6 +66,7 @@ namespace OneNoteMarkdownExporter.Services
         int FailedImageExports { get; }
         int SuppressedPrintoutImages { get; }
         int UnprocessedImageObjects { get; }
+        int RecoveredImageOcrFallbacks { get; }
         IReadOnlyList<string> UnprocessedImageDiagnostics { get; }
         IReadOnlyList<string> ImageFailureDiagnostics { get; }
         IReadOnlyList<string> AttachmentFailureDiagnostics { get; }
@@ -1436,7 +1437,8 @@ namespace OneNoteMarkdownExporter.Services
                         $"Warning: COMPLETENESS issue on '{page.Name}': " +
                         $"{completenessOnPage.FailedAttachments} attachment failure(s), " +
                         $"{completenessOnPage.FailedImages} image failure(s), " +
-                        $"{completenessOnPage.UnprocessedImages} unprocessed image object(s).";
+                        $"{completenessOnPage.UnprocessedImages} unprocessed image object(s), " +
+                        $"{completenessOnPage.RecoveredOcrFallbacks} OCR text fallback(s) recovered.";
                     result.Warnings.Add(completenessWarning);
                     Report(
                         progress,
@@ -1551,7 +1553,7 @@ namespace OneNoteMarkdownExporter.Services
             }
         }
 
-        private static (int FailedAttachments, int FailedImages, int UnprocessedImages) UpdateCompletenessStatistics(
+        private static (int FailedAttachments, int FailedImages, int UnprocessedImages, int RecoveredOcrFallbacks) UpdateCompletenessStatistics(
             ExportResult result,
             IAssetExportStatisticsProvider? stats)
         {
@@ -1569,11 +1571,13 @@ namespace OneNoteMarkdownExporter.Services
             result.FailedImages += stats.FailedImageExports;
             result.SuppressedOrNotExportedImages += stats.SuppressedPrintoutImages;
             result.UnprocessedImages += stats.UnprocessedImageObjects;
+            result.RecoveredImageOcrFallbacks += stats.RecoveredImageOcrFallbacks;
 
             return (
                 stats.FailedAttachmentExports,
                 stats.FailedImageExports,
-                stats.UnprocessedImageObjects);
+                stats.UnprocessedImageObjects,
+                stats.RecoveredImageOcrFallbacks);
         }
 
         private static void ReportCompletenessStatistics(
@@ -1589,7 +1593,7 @@ namespace OneNoteMarkdownExporter.Services
             Report(
                 progress,
                 ExportProgressKind.Message,
-                $"COMPLETENESS: Images: found {result.SourceImages}, successfully written {result.ExportedImages}, failed {result.FailedImages}, printout images intentionally suppressed {result.SuppressedOrNotExportedImages}, unprocessed image objects {result.UnprocessedImages}.",
+                $"COMPLETENESS: Images: found {result.SourceImages}, successfully written {result.ExportedImages}, failed {result.FailedImages}, printout images intentionally suppressed {result.SuppressedOrNotExportedImages}, unprocessed image objects {result.UnprocessedImages}, OCR text fallbacks recovered {result.RecoveredImageOcrFallbacks}.",
                 result);
 
             if (result.FailedAttachments == 0
@@ -1682,6 +1686,7 @@ namespace OneNoteMarkdownExporter.Services
         public int FailedImages { get; set; }
         public int SuppressedOrNotExportedImages { get; set; }
         public int UnprocessedImages { get; set; }
+        public int RecoveredImageOcrFallbacks { get; set; }
         public string? Error { get; set; }
         public List<string> Failures { get; } = new();
         public List<string> Warnings { get; } = new();
