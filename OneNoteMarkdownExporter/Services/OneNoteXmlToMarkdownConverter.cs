@@ -55,6 +55,12 @@ namespace OneNoteMarkdownExporter.Services
         public IReadOnlyList<string> AttachmentFailureDiagnostics => _attachmentFailureDiagnostics;
         private readonly List<string> _attachmentFailureDiagnostics = new();
 
+        // Compatibility property: some intermediate ExportService versions exposed
+        // AttachmentPrintoutDiagnostics on IAssetExportStatisticsProvider.
+        // The temporary printout-mapping experiment is no longer used, so return
+        // an empty collection while remaining source-compatible with those builds.
+        public IReadOnlyList<string> AttachmentPrintoutDiagnostics => Array.Empty<string>();
+
         public OneNoteXmlToMarkdownConverter()
         {
             var config = new ReverseMarkdown.Config
