@@ -54,6 +54,8 @@ namespace OneNoteMarkdownExporter.Services
         private readonly List<string> _imageFailureDiagnostics = new();
         public IReadOnlyList<string> AttachmentFailureDiagnostics => _attachmentFailureDiagnostics;
         private readonly List<string> _attachmentFailureDiagnostics = new();
+        public IReadOnlyList<string> AttachmentPrintoutDiagnostics => _attachmentPrintoutDiagnostics;
+        private readonly List<string> _attachmentPrintoutDiagnostics = new();
 
         public OneNoteXmlToMarkdownConverter()
         {
@@ -91,6 +93,7 @@ namespace OneNoteMarkdownExporter.Services
             UnprocessedImageObjects = 0;
             RecoveredImageOcrFallbacks = 0;
             _attachmentFailureDiagnostics.Clear();
+            _attachmentPrintoutDiagnostics.Clear();
             _unprocessedImageDiagnostics.Clear();
             _imageFailureDiagnostics.Clear();
 
@@ -660,7 +663,7 @@ namespace OneNoteMarkdownExporter.Services
                         return
                             $"<blockquote><p><strong>Archive note:</strong> " +
                             $"The original OneNote image/printout is unavailable in the source notebook. " +
-                            $"OneNote OCR text was preserved as a fallback. {System.Net.WebUtility.HtmlEncode(info)}</p></blockquote>" +
+                            $"OneNote OCR text was preserved as a fallback.</p></blockquote>" +
                             $"<h4>Recovered OneNote OCR text</h4>" +
                             $"<pre>{encodedOcrText}</pre>";
                     }
@@ -753,14 +756,29 @@ namespace OneNoteMarkdownExporter.Services
                     continue;
                 }
 
-                var xpsFileIndex = insertedFile
-                    .Element(_ns + "Printout")
-                    ?.Attribute("xpsFileIndex")
-                    ?.Value;
+                var directPrintouts = insertedFile.Elements(_ns + "Printout").ToList();
+                var descendantPrintouts = insertedFile.Descendants(_ns + "Printout").ToList();
 
-                if (!string.IsNullOrWhiteSpace(xpsFileIndex))
+                var directIndexes = directPrintouts
+                    .Select(printout => printout.Attribute("xpsFileIndex")?.Value)
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .ToList();
+
+                var descendantIndexes = descendantPrintouts
+                    .Select(printout => printout.Attribute("xpsFileIndex")?.Value)
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                var preferredName = insertedFile.Attribute("preferredName")?.Value ?? "none";
+                _attachmentPrintoutDiagnostics.Add(
+                    $"preferredName='{preferredName}'; " +
+                    $"directPrintoutCount={directPrintouts.Count}; directXpsIndexes='{string.Join(",", directIndexes)}'; " +
+                    $"descendantPrintoutCount={descendantPrintouts.Count}; descendantXpsIndexes='{string.Join(",", descendantIndexes)}'");
+
+                foreach (var xpsFileIndex in descendantIndexes)
                 {
-                    _exportedPrintoutIndexes.Add(xpsFileIndex);
+                    _exportedPrintoutIndexes.Add(xpsFileIndex!);
                 }
             }
         }
@@ -781,14 +799,13 @@ namespace OneNoteMarkdownExporter.Services
 
             if (success)
             {
-                var xpsFileIndex = insertedFile
-                    .Element(_ns + "Printout")
-                    ?.Attribute("xpsFileIndex")
-                    ?.Value;
-
-                if (!string.IsNullOrWhiteSpace(xpsFileIndex))
+                foreach (var xpsFileIndex in insertedFile
+                    .Descendants(_ns + "Printout")
+                    .Select(printout => printout.Attribute("xpsFileIndex")?.Value)
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.OrdinalIgnoreCase))
                 {
-                    _exportedPrintoutIndexes.Add(xpsFileIndex);
+                    _exportedPrintoutIndexes.Add(xpsFileIndex!);
                 }
             }
 
