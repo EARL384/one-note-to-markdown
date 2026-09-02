@@ -70,7 +70,6 @@ namespace OneNoteMarkdownExporter.Services
         IReadOnlyList<string> UnprocessedImageDiagnostics { get; }
         IReadOnlyList<string> ImageFailureDiagnostics { get; }
         IReadOnlyList<string> AttachmentFailureDiagnostics { get; }
-        IReadOnlyList<string> AttachmentPrintoutDiagnostics { get; }
     }
 
     public interface IMarkdownLintService
@@ -1439,7 +1438,8 @@ namespace OneNoteMarkdownExporter.Services
                         $"{completenessOnPage.FailedAttachments} attachment failure(s), " +
                         $"{completenessOnPage.FailedImages} image failure(s), " +
                         $"{completenessOnPage.UnprocessedImages} unprocessed image object(s), " +
-                        $"{completenessOnPage.RecoveredOcrFallbacks} OCR text fallback(s) recovered.";
+                        $"{completenessOnPage.RecoveredOcrFallbacks} OCR text fallback(s) recovered. " +
+                        $"PageId='{page.Id}'; ArchivePath='{finalMdPath}'.";
                     result.Warnings.Add(completenessWarning);
                     Report(
                         progress,
@@ -1458,21 +1458,6 @@ namespace OneNoteMarkdownExporter.Services
                                 progress,
                                 ExportProgressKind.Warning,
                                 $"  ATTACHMENT DIAGNOSTIC: {diagnostic}",
-                                result,
-                                page,
-                                finalMdPath);
-                        }
-                    }
-
-                    if (_xmlConverter is IAssetExportStatisticsProvider printoutMappingStatsProvider
-                        && printoutMappingStatsProvider.AttachmentPrintoutDiagnostics.Count > 0)
-                    {
-                        foreach (var diagnostic in printoutMappingStatsProvider.AttachmentPrintoutDiagnostics)
-                        {
-                            Report(
-                                progress,
-                                ExportProgressKind.Warning,
-                                $"  ATTACHMENT/PRINTOUT MAPPING DIAGNOSTIC: {diagnostic}",
                                 result,
                                 page,
                                 finalMdPath);
@@ -1606,10 +1591,14 @@ namespace OneNoteMarkdownExporter.Services
                 $"COMPLETENESS: Attachments: found {result.SourceAttachments}, successfully written {result.ExportedAttachments}, failed {result.FailedAttachments}.",
                 result);
 
+            var imageFailuresWithoutOcrFallback = Math.Max(
+                0,
+                result.FailedImages - result.RecoveredImageOcrFallbacks);
+
             Report(
                 progress,
                 ExportProgressKind.Message,
-                $"COMPLETENESS: Images: found {result.SourceImages}, successfully written {result.ExportedImages}, failed {result.FailedImages}, printout images intentionally suppressed {result.SuppressedOrNotExportedImages}, unprocessed image objects {result.UnprocessedImages}, OCR text fallbacks recovered {result.RecoveredImageOcrFallbacks}.",
+                $"COMPLETENESS: Images: found {result.SourceImages}, successfully written {result.ExportedImages}, failed {result.FailedImages}, printout images intentionally suppressed {result.SuppressedOrNotExportedImages}, unprocessed image objects {result.UnprocessedImages}, OCR text fallbacks recovered {result.RecoveredImageOcrFallbacks}, image failures without OCR fallback {imageFailuresWithoutOcrFallback}.",
                 result);
 
             if (result.FailedAttachments == 0
@@ -1624,7 +1613,7 @@ namespace OneNoteMarkdownExporter.Services
             }
             else
             {
-                var warning = $"Warning: COMPLETENESS check detected {result.FailedAttachments} attachment failure(s), {result.FailedImages} image failure(s), and {result.UnprocessedImages} unprocessed image object(s). Search this log for 'COMPLETENESS issue on'.";
+                var warning = $"Warning: COMPLETENESS check detected {result.FailedAttachments} attachment failure(s), {result.FailedImages} image failure(s), {result.UnprocessedImages} unprocessed image object(s), and {result.RecoveredImageOcrFallbacks} recovered OCR fallback(s). Search this log for 'COMPLETENESS issue on'.";
                 result.Warnings.Add(warning);
                 Report(progress, ExportProgressKind.Warning, warning, result);
             }
